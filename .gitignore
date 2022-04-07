@@ -1,0 +1,9 @@
+
+*.pdf
+*.exe
+node_modules
+packaging-work
+package-lock.json
+work/*
+dist/*
+THIRD-PARTY-LICENSES.md
