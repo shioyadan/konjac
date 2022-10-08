@@ -1,0 +1,20 @@
+{
+    "name": "PDFを表示",
+    "description": "Show PDF",
+    "background": {
+        "service_worker": "main.js" 
+    },
+    "version": "0.0",
+    "manifest_version": 3,
+    "host_permissions": [
+        "<all_urls>"
+    ],
+
+
+    "permissions": [ 
+        "contextMenus",
+        "tabs",
+        "downloads"
+    ]
+ }
+ 
