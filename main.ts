@@ -11,50 +11,29 @@ function main() {
     });
 
     // クリックハンドラの登録
-    chrome.contextMenus.onClicked.addListener((info) => {
+    chrome.contextMenus.onClicked.addListener(async (info) => {
         if (info.menuItemId == ID_KONJAC) {
             const viewerURL = chrome.runtime.getURL("viewer.html");
-            chrome.tabs.query({"active": true, "lastFocusedWindow": true}, (tabs) => {
+            let tabs = await chrome.tabs.query({"active": true, "lastFocusedWindow": true});
 
-                let orgURL = tabs[0].url as string;
-                if (!orgURL) {
-                    console.log(`Invalid URL: ${orgURL}`);
-                    return;
+            let orgURL = tabs[0].url as string;
+            if (!orgURL) {
+                console.log(`Invalid URL: ${orgURL}`);
+                return;
+            }
+
+            // let response = await fetch(orgURL);
+            // let blobResponse = await response.blob();
+
+            let id = await chrome.downloads.download({url: orgURL, filename: "test.pdf"}); 
+            chrome.downloads.onChanged.addListener(async (delta) => {
+                if (delta.id == id && delta.state && delta.state.current == "complete") {
+                    let result = await chrome.downloads.search({id: id}); 
+                    const pdfURL = encodeURIComponent(result[0].filename);
+                    const tabURL = `${viewerURL}?file=${pdfURL}`;
+                    chrome.tabs.create({url: tabURL});
+                    console.log(`Open a new tab: ${tabURL}`);
                 }
-                fetch(orgURL).then(response => {
-                    response.blob().then(blobResponse => {
-
-                        chrome.downloads.download({
-                            url: orgURL,
-                            filename: "test.pdf"
-                        }, 
-                        (id) => {
-
-                            chrome.downloads.onChanged.addListener((delta) => {
-                                if (delta.id == id && delta.state && delta.state.current == "complete") {
-                                    chrome.downloads.search({id: id}, (result) => {
-                                        const pdfURL = encodeURIComponent(result[0].filename);
-                                        const tabURL = `${viewerURL}?file=${pdfURL}`;
-                                        chrome.tabs.create({url: tabURL});
-                                        console.log(tabURL);
-                                    });
-                                }
-                            });
-
-
-                        }
-                    );
-
-                        // const fileUrl = URL.createObjectURL(blobResponse)
-                        // console.log(fileUrl);
-                    })
-                })
-        
-
-                // const pdfURL = encodeURIComponent(tabs[0].url);
-                // const url = `${viewerURL}?file=${pdfURL}`;
-                // chrome.tabs.create({url});
-                // console.log(url);
             });
         }
     });
