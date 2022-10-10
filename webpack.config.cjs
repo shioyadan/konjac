@@ -1,3 +1,5 @@
+// __dirname 等を使うために，.cjs になっている
+
 module.exports = {
     // 入力ファイル
     entry: {
@@ -15,19 +17,18 @@ module.exports = {
         // library: "external_modules",
         // libraryTarget: "umd",
     },
+
     // ブラウザ 向け
     target: "web",
 
     module: {
         rules: [
-            {
-                // 拡張子 .ts の場合
+            {   // Typescript
                 test: /\.ts$/,
-                // TypeScript をコンパイルする
                 use: "ts-loader"
             },
-            {
-                test: /\.css/,
+            {   // CSS
+                test: /\.css$/,
                 use: [
                     "style-loader",
                     {
@@ -45,18 +46,4 @@ module.exports = {
 
     // Source map の有効化
     devtool: 'inline-source-map',
-
-    // CSS
-    // module: {
-    //     rules: [{
-    //         test: /\.css/,
-    //         use: [
-    //             "style-loader",
-    //             {
-    //                 loader: "css-loader",
-    //                 options: { url: false }
-    //             }
-    //         ]
-    //     }]
-    // }
 };
