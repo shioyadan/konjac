@@ -3,7 +3,11 @@
         "name": "Ryota Shioya"
     },
     "dependencies": {
-        "pdfjs-dist": "^2.16.105"
+        "pdfjs-dist": "^2.16.105",
+        "bootstrap": "^5.2.2",
+        "@popperjs/core": "^2.11.6",
+        "style-loader": "^3.3.1",
+        "css-loader": "^6.7.1"
     },
     "devDependencies": {
         "license-checker": "15.0.0",

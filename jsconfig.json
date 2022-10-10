@@ -3,7 +3,7 @@
         "target": "ES2022",
         "checkJs": true,
         "lib": [
-            "webworker"
+            "dom"
         ],
         "moduleResolution": "node"
     },

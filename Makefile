@@ -7,7 +7,7 @@ dist/external_modules.js: external_modules_src.js webpack.config.cjs
 
 
 
-init:
+init: package.json
 	npm install
 
 clean:
