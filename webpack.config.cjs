@@ -1,20 +1,44 @@
 module.exports = {
     // 入力ファイル
-    entry: "./external_modules_src.js",
+    entry: {
+        viewer: "./viewer.ts",
+        main: "./main.ts"
+    },
     output: {
         // 出力先
         path: `${__dirname}/dist`,
         // 生成済みファイルから参照される時のパス
         publicPath: "dist/",
         // 生成ファイル
-        filename: "external_modules.js",
+        filename: "[name].js",
         // 出力フォーマット
-        library: "external_modules",
-        libraryTarget: "umd",
+        // library: "external_modules",
+        // libraryTarget: "umd",
     },
-    // electron 向け
+    // ブラウザ 向け
     target: "web",
-    
+
+    module: {
+        rules: [
+            {
+                // 拡張子 .ts の場合
+                test: /\.ts$/,
+                // TypeScript をコンパイルする
+                use: "ts-loader"
+            },
+            {
+                test: /\.css/,
+                use: [
+                    "style-loader",
+                    {
+                        loader: "css-loader",
+                        options: { url: false }
+                    }
+                ]
+            }
+        ]
+    },
+
     // 開発バージョン
     //mode: "production",
     mode: "development",
@@ -23,16 +47,16 @@ module.exports = {
     devtool: 'inline-source-map',
 
     // CSS
-    module: {
-        rules: [{
-            test: /\.css/,
-            use: [
-                "style-loader",
-                {
-                    loader: "css-loader",
-                    options: { url: false }
-                }
-            ]
-        }]
-    }
+    // module: {
+    //     rules: [{
+    //         test: /\.css/,
+    //         use: [
+    //             "style-loader",
+    //             {
+    //                 loader: "css-loader",
+    //                 options: { url: false }
+    //             }
+    //         ]
+    //     }]
+    // }
 };

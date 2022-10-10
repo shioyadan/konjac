@@ -16,7 +16,11 @@ function main() {
             const viewerURL = chrome.runtime.getURL("viewer.html");
             chrome.tabs.query({"active": true, "lastFocusedWindow": true}, (tabs) => {
 
-                let orgURL = tabs[0].url;
+                let orgURL = tabs[0].url as string;
+                if (!orgURL) {
+                    console.log(`Invalid URL: ${orgURL}`);
+                    return;
+                }
                 fetch(orgURL).then(response => {
                     response.blob().then(blobResponse => {
 

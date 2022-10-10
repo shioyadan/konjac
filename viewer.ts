@@ -1,30 +1,36 @@
 "use strict";
+import "./external_modules_src.ts";
 
-// @ts-ignore
-let pdfjsLib = external_modules.pdfjsLib;
+import * as pdfjsLib from "pdfjs-dist";
+import {TextItem} from "pdfjs-dist/types/src/display/api";
+
+pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/build/pdf.worker.js", import.meta.url));
+
 console.log("initialized.");
 
-const NODE_TYPE_TEXT = 1;
-const NODE_TYPE_SECTION_TITLE = 2;
+enum PDF_NodeType {
+    TEXT = 1,
+    TITLE = 2
+};
 
-class Node {
-    constructor(str, type) {
+class PDF_Node {
+    str: string;
+    type: PDF_NodeType;
+    constructor(str: string, type: PDF_NodeType) {
         this.str = str;
         this.type = type;
     }
 };
 
-/**
- * @param {Node[]} nodes 
- */
-function show(nodes) {
+
+function show(nodes: PDF_Node[]) {
 
     for (let node of nodes) {
         // @ts-ignore
         let text = document.createTextNode(node.str); // テキストノードを作成
 
         // @ts-ignore
-        var div = document.createElement(node.type == NODE_TYPE_TEXT ? "p" : "h2"); // p要素作成
+        var div = document.createElement(node.type == PDF_NodeType.TEXT ? "p" : "h2"); // p要素作成
         div.appendChild(text);
         // @ts-ignore
         document.getElementById("main").appendChild(div);
@@ -36,9 +42,8 @@ const TITLE_EXCEPTION_PATTERN = /^and|the|of|at|to|on|in|for|by|with|from|before
 
 /**
  * タイトルを検出
- * @param {string} line 
  */
-function isTitle(line) {
+function isTitle(line: string) {
     // ピリオドがなく，単語が全部大文字始まりの行はタイトルとみなす
     let title = false;
     if (!line.match(/\.$/)) {
@@ -59,32 +64,30 @@ function isTitle(line) {
     return title;
 }
 
-function load(fileName) {
-    /** @type {import("pdfjs-dist").PDFDocumentLoadingTask} */
+function load(fileName: string) {
     let loadingTask = pdfjsLib.getDocument(fileName);
     loadingTask.promise.then(async (pdf) => {
-        let nodes = [];
+        let nodes: PDF_Node[] = [];
         for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
             let page = await pdf.getPage(pageNumber);
             let textContent = await page.getTextContent();
             let prevStr = "";
             textContent.items.forEach(
-                /**
-                 * @param {import("pdfjs-dist/types/src/display/api").TextItem} textItem 
-                 */
-                (textItem) => {
-                prevStr += (prevStr != "" && textItem.str != "" ? " " : "") + textItem.str;
-                if (textItem.hasEOL) {
-                    if (prevStr.match(/\.$/)) {
-                        nodes.push(new Node(prevStr, NODE_TYPE_TEXT));
-                        prevStr = "";
-                    }
-                    else if (isTitle(prevStr)) {
-                        nodes.push(new Node(prevStr, NODE_TYPE_SECTION_TITLE));
-                        prevStr = "";
+                (textItemArg) => {
+                    let textItem = textItemArg as TextItem; // 複数の型がくるのでキャスト
+                    prevStr += (prevStr != "" && textItem.str != "" ? " " : "") + textItem.str;
+                    if (textItem.hasEOL) {
+                        if (prevStr.match(/\.$/)) {
+                            nodes.push(new PDF_Node(prevStr, PDF_NodeType.TEXT));
+                            prevStr = "";
+                        }
+                        else if (isTitle(prevStr)) {
+                            nodes.push(new PDF_Node(prevStr, PDF_NodeType.TITLE));
+                            prevStr = "";
+                        }
                     }
                 }
-            });
+            );
         }
         show(nodes);
     });
@@ -95,7 +98,7 @@ function load(fileName) {
 chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
     let url = tabs[0].url;
     // file= にローカルにダウンロードした PDF の URL が埋め込まれているので，それをロードする
-    if (url.match(/\?file=(.+)$/)) {
+    if (url && url.match(/\?file=(.+)$/)) {
         let targetURL = decodeURIComponent(RegExp.$1);
         console.log(targetURL);
         load(targetURL);        
