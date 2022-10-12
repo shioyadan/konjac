@@ -68,7 +68,7 @@ function load(fileName: string) {
     let loadingTask = pdfjsLib.getDocument({
         url: fileName,
         cMapPacked: true,
-        cMapUrl: "cmaps/" 
+        cMapUrl: "cmaps/"   // 日本語（や他の言語）を表示するために必要なマップファイル．Makefile で dist にコピーされる
     });
 
     loadingTask.promise.then(async (pdf) => {
