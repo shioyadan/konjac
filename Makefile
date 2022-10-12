@@ -1,5 +1,6 @@
 all: 
 	npx webpack --config=webpack.config.cjs
+	cp node_modules/pdfjs-dist/cmaps dist/cmaps -r 
 
 # npx tsc
 

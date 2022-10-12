@@ -65,7 +65,12 @@ function isTitle(line: string) {
 }
 
 function load(fileName: string) {
-    let loadingTask = pdfjsLib.getDocument(fileName);
+    let loadingTask = pdfjsLib.getDocument({
+        url: fileName,
+        cMapPacked: true,
+        cMapUrl: "cmaps/" 
+    });
+
     loadingTask.promise.then(async (pdf) => {
         let nodes: PDF_Node[] = [];
         for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
@@ -77,7 +82,7 @@ function load(fileName: string) {
                     let textItem = textItemArg as TextItem; // 複数の型がくるのでキャスト
                     prevStr += (prevStr != "" && textItem.str != "" ? " " : "") + textItem.str;
                     if (textItem.hasEOL) {
-                        if (prevStr.match(/\.$/)) {
+                        if (prevStr.match(/[．。\.]$/)) {
                             nodes.push(new PDF_Node(prevStr, PDF_NodeType.TEXT));
                             prevStr = "";
                         }

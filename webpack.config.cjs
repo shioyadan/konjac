@@ -45,5 +45,5 @@ module.exports = {
     mode: "development",
 
     // Source map の有効化
-    devtool: 'inline-source-map',
+    devtool: 'inline-source-map'
 };
