@@ -14,9 +14,15 @@ function main() {
     chrome.contextMenus.onClicked.addListener(async (info) => {
         if (info.menuItemId == ID_KONJAC) {
             const viewerURL = chrome.runtime.getURL("viewer.html");
-            let tabs = await chrome.tabs.query({"active": true, "lastFocusedWindow": true});
 
-            let orgURL = tabs[0].url as string;
+            let orgURL: string|undefined = "";
+            if (info?.frameUrl) {
+                orgURL = info.frameUrl;
+            }
+            else if (info?.pageUrl) {
+                orgURL = info.pageUrl;
+            }
+
             if (!orgURL) {
                 console.log(`Invalid URL: ${orgURL}`);
                 return;
@@ -25,6 +31,7 @@ function main() {
             // let response = await fetch(orgURL);
             // let blobResponse = await response.blob();
 
+            // PDF ファイルを１回ダウンロードしてから開く
             let id = await chrome.downloads.download({url: orgURL, filename: "test.pdf"}); 
             chrome.downloads.onChanged.addListener(async (delta) => {
                 if (delta.id == id && delta.state && delta.state.current == "complete") {
