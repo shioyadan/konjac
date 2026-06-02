@@ -40,6 +40,10 @@ module.exports = {
         ]
     },
 
+    resolve: {
+        extensions: [".ts", ".js"]
+    },
+
     // 開発バージョン
     //mode: "production",
     mode: "development",
