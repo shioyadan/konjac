@@ -9,9 +9,6 @@ module.exports = {
         filename: "cli.cjs"
     },
     target: "node",
-    externals: {
-        "pdfjs-dist/build/pdf.js": "commonjs pdfjs-dist/build/pdf.js"
-    },
     module: {
         rules: [
             {

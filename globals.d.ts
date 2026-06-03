@@ -1,3 +1,4 @@
-declare module "pdfjs-dist/build/pdf.js" {
-    export * from "pdfjs-dist";
+declare module "*.css" {
+    const content: string;
+    export default content;
 }

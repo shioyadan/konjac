@@ -1,7 +1,9 @@
 "use strict";
 
-import * as pdfjsLib from "pdfjs-dist/build/pdf.js";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import {PDF_Node, extractNodesFromTextItems, nodesToHTML} from "./extractor";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs";
 
 declare const process: {
     argv: string[];

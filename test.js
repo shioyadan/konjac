@@ -1,6 +1,8 @@
 "use strict";
 
-import pdfjsLib from "pdfjs-dist/build/pdf.js";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).href;
 
 const fileName = "work/test.pdf"
 

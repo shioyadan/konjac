@@ -1,10 +1,10 @@
 "use strict";
-import "./external_modules_src.ts";
+import "./external_modules_src";
 
-import * as pdfjsLib from "pdfjs-dist";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import {PDF_Node, extractNodesFromTextItems, nodeToHTMLElementName} from "./extractor";
 
-pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/build/pdf.worker.js", import.meta.url));
+pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url), {type: "module"});
 
 console.log("initialized.");
 

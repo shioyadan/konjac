@@ -9,6 +9,7 @@ all:
 
 cli-build:
 	npx webpack --config=webpack.cli.config.cjs
+	cp node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs dist/pdf.worker.mjs
 
 cli: cli-build
 	mkdir -p "$(dir $(OUT))"
