@@ -10,7 +10,7 @@ module.exports = {
         // 出力先
         path: `${__dirname}/dist`,
         // 生成済みファイルから参照される時のパス
-        publicPath: "dist/",
+        publicPath: "auto",
         // 生成ファイル
         filename: "[name].js",
         // 出力フォーマット

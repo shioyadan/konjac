@@ -2,7 +2,7 @@
 import "./external_modules_src";
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import {PDF_Node, extractNodesFromTextItems, nodeToHTMLElementName} from "./extractor";
+import {PDF_Node, extractNodesFromPages, nodeToHTMLElementName} from "./extractor";
 
 pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url), {type: "module"});
 
@@ -31,13 +31,13 @@ function load(fileName: string) {
     });
 
     loadingTask.promise.then(async (pdf) => {
-        let nodes: PDF_Node[] = [];
+        let pages: unknown[][] = [];
         for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
             let page = await pdf.getPage(pageNumber);
             let textContent = await page.getTextContent();
-            nodes.push(...extractNodesFromTextItems(textContent.items));
+            pages.push(textContent.items);
         }
-        show(nodes);
+        show(extractNodesFromPages(pages));
     });
 }
 
