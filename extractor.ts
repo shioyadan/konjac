@@ -6,7 +6,7 @@
 //   2. y 座標と x 座標から TextLine を復元する。
 //   3. 文書全体から本文フォントサイズと本文幅を推定する。
 //   4. ページ番号などの一般的な装飾を落とし、読み順を 2 段組み前提で整える。
-//   5. Figure/Table キャプションから図表領域を粗く推定し、その領域内の文字行を本文から外す。
+//   5. Figure/Table/Algorithm キャプションから図表領域を粗く推定し、その領域内の文字行を本文から外す。
 //   6. フォントサイズと文字列パターンから title/heading/figure/text に分類する。
 //   7. 連続する本文行を段落にまとめる。
 //   8. 図表をまたいで分割された段落を結合し、HTML タグへ対応づける。
@@ -363,14 +363,32 @@ const CAPTION_NUMBER_PATTERN = "(?:\\d+|[IVXLCDM]+)";
 const CAPTION_LINE_PATTERN = new RegExp(`^(?:Figure|Fig\\.|Table)\\s+${CAPTION_NUMBER_PATTERN}(?:\\s*[:.]|$)`, "i");
 const TABLE_CAPTION_PATTERN = new RegExp(`^Table\\s+${CAPTION_NUMBER_PATTERN}\\b`, "i");
 const TABLE_CAPTION_WITH_TITLE_PATTERN = new RegExp(`^Table\\s+${CAPTION_NUMBER_PATTERN}\\s*[:.]?\\s+\\S+`, "i");
+const ALGORITHM_CAPTION_PATTERN = /^Algorithm\s+\d+\b/i;
 
 // 図表キャプションの先頭行を検出する。
-function isCaptionLine(line: TextLine) {
-    return CAPTION_LINE_PATTERN.test(line.text);
+function isCaptionLine(line: TextLine, bodyFontSize?: number, columnWidth?: number) {
+    if (!CAPTION_LINE_PATTERN.test(line.text)) {
+        return false;
+    }
+
+    // "Fig. 12. The ..." のように本文行頭に図番号参照が来る場合を、実キャプションと区別する。
+    if (
+        bodyFontSize != null &&
+        columnWidth != null &&
+        isParagraphLikeLine(line, bodyFontSize, columnWidth)
+    ) {
+        return false;
+    }
+
+    return true;
 }
 
 function isTableCaption(text: string) {
     return TABLE_CAPTION_PATTERN.test(text);
+}
+
+function isAlgorithmCaptionLine(line: TextLine) {
+    return ALGORITHM_CAPTION_PATTERN.test(line.text);
 }
 
 // 1 ページ目で本文より十分大きい行を論文タイトル候補とする。
@@ -609,7 +627,7 @@ function paragraphEndsWithSentenceStop(text: string) {
 function startsLikeNewBlock(text: string) {
     let trimmed = text.trim();
     return (
-        /^(?:Figure|Fig\.|Table)\s+/i.test(trimmed) ||
+        /^(?:Figure|Fig\.|Table|Algorithm)\s+/i.test(trimmed) ||
         /^Observation-\d+/.test(trimmed) ||
         /^(?:[A-Z]|[IVX]+)\.\s+/.test(trimmed)
     );
@@ -1017,7 +1035,7 @@ function fitTableRectToInnerText(
             break;
         }
 
-        if (isCaptionLine(line) || isHeadingLine(line, bodyFontSize)) {
+        if (isCaptionLine(line, bodyFontSize, columnWidth) || isHeadingLine(line, bodyFontSize)) {
             break;
         }
 
@@ -1093,23 +1111,116 @@ function fitFigureRectToInnerText(rect: PDF_Rect, lines: TextLine[], bodyFontSiz
     };
 }
 
-// 読み順に並んだ行から、キャプションと図表領域を先に集める。
+// Algorithm 環境はキャプション下に疑似コードが本文サイズで並ぶことが多い。
+// 同じカラム内で行間が詰まって続く範囲だけを画像化し、下に戻る本文は含めない。
+function estimateAlgorithmRect(
+    captionLine: TextLine,
+    lines: TextLine[],
+    captionIndex: number,
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics
+) {
+    let pageMargin = 36;
+    let padding = 8;
+    let gapLimit = Math.max(bodyFontSize * 1.7, captionLine.fontSize * 1.7);
+    let columnLeft = captionLine.x;
+    let columnRight = Math.min(metric.width - pageMargin, columnLeft + columnWidth + padding);
+    let codeLines: TextLine[] = [];
+    let lastY = captionLine.y;
+
+    for (let i = captionIndex + 1; i < lines.length; i++) {
+        let line = lines[i];
+        if (line.page != captionLine.page) {
+            break;
+        }
+
+        if (line.y >= captionLine.y) {
+            continue;
+        }
+
+        let sameColumn =
+            line.x <= columnRight + padding &&
+            line.x + line.width >= columnLeft - padding;
+        if (!sameColumn) {
+            continue;
+        }
+
+        let gap = lastY - line.y;
+        if (gap > gapLimit) {
+            break;
+        }
+
+        if (
+            isAlgorithmCaptionLine(line) ||
+            isCaptionLine(line, bodyFontSize, columnWidth) ||
+            isHeadingLine(line, bodyFontSize)
+        ) {
+            break;
+        }
+
+        codeLines.push(line);
+        lastY = line.y;
+    }
+
+    if (codeLines.length < 2) {
+        return null;
+    }
+
+    let minX = Math.min(...codeLines.map((line) => line.x));
+    let maxX = Math.max(...codeLines.map((line) => line.x + line.width));
+    let minY = Math.min(...codeLines.map((line) => line.y - line.fontSize * 0.25));
+    let maxY = Math.max(...codeLines.map((line) => line.y + line.fontSize));
+    let x = clamp(Math.min(columnLeft, minX) - padding, pageMargin, metric.width - pageMargin);
+    let right = clamp(Math.max(columnRight, maxX) + padding, x + 24, metric.width - pageMargin);
+    let y = clamp(minY - padding, 0, metric.height);
+    let top = clamp(Math.min(maxY + padding, captionLine.y - captionLine.fontSize * 0.25), y + 24, metric.height);
+
+    return {
+        page: captionLine.page,
+        x,
+        y,
+        width: right - x,
+        height: top - y
+    };
+}
+
+// 読み順に並んだ行から、キャプションと図表・疑似コード領域を先に集める。
 function collectFigureCandidates(lines: TextLine[], bodyFontSize: number, columnWidth: number, pageMetrics: Map<number, PageMetrics>) {
     let candidates: FigureCandidate[] = [];
 
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i];
-        if (!isCaptionLine(line)) {
+        let algorithmCaption = isAlgorithmCaptionLine(line);
+        if (!algorithmCaption && !isCaptionLine(line, bodyFontSize, columnWidth)) {
             continue;
         }
 
         let caption = line.text;
         let endIndex = i;
+        let metric = pageMetrics.get(line.page);
+        if (!metric) {
+            continue;
+        }
+
+        if (algorithmCaption) {
+            candidates.push({
+                startIndex: i,
+                endIndex,
+                node: new PDF_Node(
+                    caption,
+                    PDF_NodeType.FIGURE,
+                    estimateAlgorithmRect(line, lines, i, bodyFontSize, columnWidth, metric) ?? undefined
+                )
+            });
+            continue;
+        }
+
         let captionLines = 1;
         while (!captionLooksComplete(caption) && captionLines < 20 && endIndex + 1 < lines.length) {
             let next = lines[endIndex + 1];
             if (
-                isCaptionLine(next) ||
+                isCaptionLine(next, bodyFontSize, columnWidth) ||
                 isTitleLine(next, bodyFontSize) ||
                 isHeadingLine(next, bodyFontSize) ||
                 !isLikelyCaptionContinuationLine(line, lines[endIndex], next, bodyFontSize, columnWidth)
@@ -1120,11 +1231,6 @@ function collectFigureCandidates(lines: TextLine[], bodyFontSize: number, column
             caption = appendLineText(caption, next.text);
             endIndex++;
             captionLines++;
-        }
-
-        let metric = pageMetrics.get(line.page);
-        if (!metric) {
-            continue;
         }
 
         let rect = estimateFigureRect(caption, line, columnWidth, metric);
