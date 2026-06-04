@@ -527,9 +527,15 @@ function clamp(value: number, minValue: number, maxValue: number) {
 // キャプション行を基準に、Figure は上側、Table は下側を図表領域として切り出す。
 // これは一般的な論文レイアウト向けの経験則で、個別 PDF 固有の文字列には依存しない。
 function estimateFigureRect(caption: string, line: TextLine, columnWidth: number, metric: PageMetrics) {
+    // 図表の端に本文やページ外領域を含めすぎないよう、最低限の余白を置く。
     let pageMargin = 36;
     let padding = Math.max(6, line.fontSize * 0.8);
+
+    // キャプションがカラム幅を大きく超える場合は、単一カラムではなくページ幅に近い図表とみなす。
     let isWide = line.width > columnWidth * 1.25 || line.width > metric.width * 0.48;
+
+    // 短いキャプションは中央寄せされることがあるため、キャプション左端だけを図の左端とはみなさない。
+    // ただし隣のカラム本文を巻き込まないよう、カラム左端へ寄せる量には上限を置く。
     let rightColumnLeft = Math.max(metric.width / 2, metric.maxX - columnWidth);
     let columnLeft = line.x >= metric.width / 2 ? rightColumnLeft : metric.minX;
     let captionX = Math.max(pageMargin, line.x - 4);
@@ -538,10 +544,13 @@ function estimateFigureRect(caption: string, line: TextLine, columnWidth: number
     let x = isWide
         ? Math.max(pageMargin, metric.minX - 4)
         : Math.min(captionX, Math.max(columnX, captionX - maxColumnSnap));
+
+    // wide 図表は本文領域全体、通常図表は推定カラム幅を基本幅として切り出す。
     let width = isWide
         ? Math.min(metric.width - x - pageMargin, Math.max(metric.maxX - x + 4, line.width + padding * 2))
         : Math.min(metric.width - x - pageMargin, Math.max(columnWidth + padding, line.width + padding * 2));
 
+    // 最初の矩形は保守的な最大高さに抑える。後段で図内テキストや本文行を使ってさらに詰める。
     let heightLimit = isTableCaption(caption)
         ? Math.min(metric.height * 0.14, 95)
         : Math.min(metric.height * 0.34, 240);
@@ -549,21 +558,26 @@ function estimateFigureRect(caption: string, line: TextLine, columnWidth: number
     let height = 0;
 
     if (isTableCaption(caption)) {
+        // Table はキャプションが表の上に置かれることが多いので、キャプション下側を候補にする。
         let top = line.y - line.fontSize - padding;
         height = Math.min(heightLimit, Math.max(0, top - pageMargin));
         y = top - height;
     }
     else {
+        // Figure はキャプションが図の下に置かれることが多いので、キャプション上側を候補にする。
+        // キャプション文字を画像へ含めない程度にだけ間隔を空ける。
         let figureGap = Math.max(2, line.fontSize * 0.25);
         y = line.y + line.fontSize + figureGap;
         height = Math.min(heightLimit, Math.max(0, metric.height - pageMargin - y));
     }
 
+    // 推定値がページ外へ出た場合に、Canvas crop が破綻しない範囲へ丸める。
     x = clamp(x, 0, metric.width);
     y = clamp(y, 0, metric.height);
     width = clamp(width, 0, metric.width - x);
     height = clamp(height, 0, metric.height - y);
 
+    // 小さすぎる矩形は画像化しても意味が薄いので、図表候補から外す。
     if (width < 24 || height < 24) {
         return null;
     }
