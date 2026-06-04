@@ -530,7 +530,14 @@ function estimateFigureRect(caption: string, line: TextLine, columnWidth: number
     let pageMargin = 36;
     let padding = Math.max(6, line.fontSize * 0.8);
     let isWide = line.width > columnWidth * 1.25 || line.width > metric.width * 0.48;
-    let x = isWide ? Math.max(pageMargin, metric.minX - 4) : Math.max(pageMargin, line.x - 4);
+    let rightColumnLeft = Math.max(metric.width / 2, metric.maxX - columnWidth);
+    let columnLeft = line.x >= metric.width / 2 ? rightColumnLeft : metric.minX;
+    let captionX = Math.max(pageMargin, line.x - 4);
+    let columnX = Math.max(pageMargin, columnLeft - 4);
+    let maxColumnSnap = Math.min(columnWidth * 0.25, 48);
+    let x = isWide
+        ? Math.max(pageMargin, metric.minX - 4)
+        : Math.min(captionX, Math.max(columnX, captionX - maxColumnSnap));
     let width = isWide
         ? Math.min(metric.width - x - pageMargin, Math.max(metric.maxX - x + 4, line.width + padding * 2))
         : Math.min(metric.width - x - pageMargin, Math.max(columnWidth + padding, line.width + padding * 2));
@@ -547,7 +554,8 @@ function estimateFigureRect(caption: string, line: TextLine, columnWidth: number
         y = top - height;
     }
     else {
-        y = line.y + line.fontSize + padding;
+        let figureGap = Math.max(2, line.fontSize * 0.25);
+        y = line.y + line.fontSize + figureGap;
         height = Math.min(heightLimit, Math.max(0, metric.height - pageMargin - y));
     }
 
