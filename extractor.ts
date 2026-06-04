@@ -148,7 +148,7 @@ const COLUMN_GAP = 14.0;
 // PDF.js の transform から文字列、座標、フォントサイズを取り出す。
 function textItemToPart(textItemArg: unknown, page: number) {
     let textItem = textItemArg as PDF_TextItemLike;
-    if (typeof textItem.str != "string" || textItem.str == "") {
+    if (typeof textItem.str != "string" || textItem.str.trim() == "") {
         return null;
     }
 
@@ -615,16 +615,56 @@ function startsLikeNewBlock(text: string) {
     );
 }
 
+// 図中の目盛りやベンチマーク名の列は数字・記号・短い識別子から始まりやすい。
+// これを段落継続の根拠にすると、図の内側の文字が本文へ混ざるため除外する。
+function startsLikeNonProseFragment(text: string) {
+    let trimmed = text.trim();
+    if (/^\d+(?:\s+(?:\d|1E[+-]?\d+)){3,}/i.test(trimmed)) {
+        return true;
+    }
+
+    let tokens = trimmed.split(/\s+/).slice(0, 8);
+    let labelLikeTokens = tokens.filter((token) =>
+        /[_.]|\d/.test(token) &&
+        !/^\(?\d+(?:[.,]\d+)?%?\)?$/.test(token)
+    ).length;
+    let proseTokens = tokens.filter((token) => /[a-z]{3,}/i.test(token)).length;
+
+    return tokens.length >= 4 && labelLikeTokens >= 3 && proseTokens <= 2;
+}
+
 // 小文字や数字で始まる十分な長さのテキストは、直前の文の続きである可能性が高い。
 // 1 文字程度の断片は図中ラベル由来のことがあるため、継続根拠にはしない。
 function startsLikeParagraphContinuation(text: string) {
     let trimmed = text.trim();
-    return trimmed.length > 2 && /^[("']?[a-z0-9]/.test(trimmed);
+    if (trimmed.length <= 2 || startsLikeNonProseFragment(trimmed)) {
+        return false;
+    }
+
+    if (/^[("']?\s*\d/.test(trimmed)) {
+        return /[a-z]{3,}/i.test(trimmed);
+    }
+
+    return /^[("']?\s*[a-z]/.test(trimmed);
 }
 
 // 前半が前置詞や接続詞などで終わる場合、次のテキストを同じ文の続きとみなしやすい。
 function endsWithOpenPhrase(text: string) {
     return /(?:[-,;:]|\b(?:and|or|of|the|a|an|to|in|on|for|with|without|by|from|as|than|that|which|when|where|while|because|using|between|into|across|only|most|all))$/i.test(text.trim());
+}
+
+// 数式断片で終わる段落は、通常の句点終端よりも次行との結合を優先する。
+function endsWithFormulaFragment(text: string) {
+    return /(?:\(\s*\)|[∑⌊⌋∼=+\-*/,:;]|\b(?:at|of|to|is|are|where|which|when|therefore))$/i.test(text.trim());
+}
+
+// 数式行の一部は句読点や括弧から始まるため、通常の小文字開始とは別に扱う。
+function startsLikeFormulaContinuation(text: string) {
+    return /^[("']?\s*(?:[a-z]|\(|;|,|∑|⌊|O\b|log\b)/.test(text.trim());
+}
+
+function startsLikeSentenceStart(text: string) {
+    return /^[("']?\s*[A-Z]/.test(text.trim());
 }
 
 // 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
@@ -633,15 +673,27 @@ function looksLikeInterruptedParagraph(before: string, after: string) {
         return false;
     }
 
+    if (startsLikeNonProseFragment(after)) {
+        return false;
+    }
+
     if (before.trim().endsWith("-")) {
         return true;
     }
 
-    if (paragraphEndsWithSentenceStop(before)) {
+    if (paragraphEndsWithSentenceStop(before) && !endsWithFormulaFragment(before)) {
         return false;
     }
 
-    return startsLikeParagraphContinuation(after) || endsWithOpenPhrase(before);
+    let startsLikeContinuation =
+        startsLikeParagraphContinuation(after) ||
+        startsLikeFormulaContinuation(after);
+
+    return (
+        startsLikeContinuation ||
+        (endsWithFormulaFragment(before) || endsWithOpenPhrase(before)) &&
+            !startsLikeSentenceStart(after)
+    );
 }
 
 // 図表が段落の途中に挿入された場合、本文を結合して図表を段落の直後へ寄せる。
@@ -695,6 +747,27 @@ function moveInterruptedFiguresAfterParagraphs(nodes: PDF_Node[]) {
 
         result.push(new PDF_Node(text, PDF_NodeType.TEXT), ...delayedFigures);
         i = cursor;
+    }
+
+    return result;
+}
+
+// 図をまたがない場合でも、数式断片などで隣接 TEXT に割れた本文は最後にまとめ直す。
+function mergeAdjacentTextFragments(nodes: PDF_Node[]) {
+    let result: PDF_Node[] = [];
+
+    for (let node of nodes) {
+        let prev = result[result.length - 1];
+        if (
+            prev?.type == PDF_NodeType.TEXT &&
+            node.type == PDF_NodeType.TEXT &&
+            looksLikeInterruptedParagraph(prev.str, node.str)
+        ) {
+            prev.str = appendLineText(prev.str, node.str);
+        }
+        else {
+            result.push(node);
+        }
     }
 
     return result;
@@ -787,6 +860,61 @@ function isParagraphLikeLine(line: TextLine, bodyFontSize: number, columnWidth: 
         line.width > columnWidth * 0.85 &&
         line.text.length > 55
     );
+}
+
+function looksLikeBodyLine(line: TextLine, bodyFontSize: number) {
+    return (
+        line.fontSize >= bodyFontSize - 1.2 ||
+        isCaptionLine(line) ||
+        isHeadingLine(line, bodyFontSize)
+    );
+}
+
+function lineHorizontallyRelated(a: TextLine, b: TextLine, columnWidth: number) {
+    let aRight = a.x + a.width;
+    let bRight = b.x + b.width;
+    let overlap = Math.min(aRight, bRight) - Math.max(a.x, b.x);
+
+    return overlap > -columnWidth * 0.2 || Math.abs(a.x - b.x) < columnWidth * 0.65;
+}
+
+// インライン数式の上付き・下付きは小さい行として抽出されることがある。
+// 近くに本文サイズの行があれば、行自体は捨てても段落継続状態は保つ。
+function nearBodyLine(
+    line: TextLine,
+    other: TextLine | null | undefined,
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    return (
+        other != null &&
+        other.page == line.page &&
+        Math.abs(other.y - line.y) < bodyFontSize * 1.8 &&
+        lineHorizontallyRelated(line, other, columnWidth) &&
+        looksLikeBodyLine(other, bodyFontSize)
+    );
+}
+
+function isFormulaOnlyLine(line: TextLine, columnWidth: number) {
+    let text = line.text.trim();
+    if (line.width > columnWidth * 0.4) {
+        return false;
+    }
+
+    if (/^[(){}\[\]⌊⌋∑∼=+\-*/,:;\s]+$/.test(text)) {
+        return true;
+    }
+
+    return /^(?:O|P|M|N|k)$/.test(text) && line.width < columnWidth * 0.08;
+}
+
+// 本文フォントより小さい行と記号だけの行は、図表ラベルや数式部品として扱う。
+function shouldDropStructuralFragmentLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    if (isCaptionLine(line) || isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize)) {
+        return false;
+    }
+
+    return line.fontSize < bodyFontSize - 1.2 || isFormulaOnlyLine(line, columnWidth);
 }
 
 // キャプション継続行は、キャプション先頭と近いフォント・近い位置に出ることが多い。
@@ -1112,8 +1240,15 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
             continue;
         }
 
-        if (line.fontSize < bodyFontSize - 1.2 && !isCaptionLine(line) && !isHeadingLine(line, bodyFontSize)) {
-            prevTextLine = null;
+        if (shouldDropStructuralFragmentLine(line, bodyFontSize, columnWidth)) {
+            let prevLine = i > 0 ? readingLines[i - 1] : null;
+            let nextLine = readingLines[i + 1];
+            if (
+                !nearBodyLine(line, prevLine, bodyFontSize, columnWidth) &&
+                !nearBodyLine(line, nextLine, bodyFontSize, columnWidth)
+            ) {
+                prevTextLine = null;
+            }
             continue;
         }
 
@@ -1140,7 +1275,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
 
     flushTitle();
     flushParagraph();
-    return moveInterruptedFiguresAfterParagraphs(nodes);
+    return mergeAdjacentTextFragments(moveInterruptedFiguresAfterParagraphs(nodes));
 }
 
 // 旧 API 互換: 1 ページ分の TextItem だけから抽出する。
