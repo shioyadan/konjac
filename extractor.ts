@@ -372,17 +372,54 @@ function isTitleLine(line: TextLine, bodyFontSize: number) {
     return line.page == 1 && line.fontSize >= bodyFontSize + 5;
 }
 
-// 1., 2.1, 2.2.3 などの章・節番号付き見出しだけを拾う。
+function isAbstractHeading(text: string) {
+    return /^(?:ABSTRACT|Abstract)$/.test(text);
+}
+
+function isReferencesHeading(text: string) {
+    return /^(?:REFERENCES|References)$/.test(text);
+}
+
+function arabicSectionNumbers(text: string) {
+    let match = text.match(/^(\d+(?:\.\d+)*\.?)\s+([A-Z][A-Za-z0-9 .&()/\-]+)$/);
+    if (!match) {
+        return null;
+    }
+
+    // 2.1 や 3.1.2 は節番号だが、2.70 GHz のような小数値は見出しではない。
+    let numbers = match[1].replace(/\.$/, "").split(".").map((part) => Number(part));
+    if (!numbers.every((number) => Number.isInteger(number) && number > 0 && number <= 30)) {
+        return null;
+    }
+
+    return numbers;
+}
+
+function isArabicSectionHeading(text: string) {
+    return arabicSectionNumbers(text) != null;
+}
+
+function isRomanSectionHeading(text: string) {
+    return /^[IVX]+\.\s+[A-Z][A-Za-z0-9 .&()/\-]+$/.test(text);
+}
+
+function isLetteredSectionHeading(text: string) {
+    return /^[A-Z]\.\s+[A-Z0-9][A-Za-z0-9 .&()/\-]+$/.test(text);
+}
+
+// 1., 1 Introduction, 2.1, IV., A. などの章・節番号付き見出しだけを拾う。
 function isNumberedSectionHeading(text: string) {
     return (
-        /^\d+(?:\.\d+)+\s+[A-Za-z]/.test(text) ||
-        /^\d+\.\s+[A-Z0-9][A-Z0-9 .&()/\-]+$/.test(text)
+        isArabicSectionHeading(text) ||
+        isRomanSectionHeading(text) ||
+        isLetteredSectionHeading(text)
     );
 }
 
 function isHeadingText(text: string) {
     return (
-        text == "ABSTRACT" ||
+        isAbstractHeading(text) ||
+        isReferencesHeading(text) ||
         isNumberedSectionHeading(text)
     );
 }
@@ -393,12 +430,21 @@ function isHeadingLine(line: TextLine, bodyFontSize: number) {
         return false;
     }
 
-    if (line.text == "ABSTRACT") {
+    if (isAbstractHeading(line.text) || isReferencesHeading(line.text)) {
         return true;
     }
 
-    if (isNumberedSectionHeading(line.text)) {
-        return line.fontSize >= bodyFontSize + 0.8 || line.text.length < 100;
+    let arabicNumbers = arabicSectionNumbers(line.text);
+    if (arabicNumbers) {
+        if (arabicNumbers.length == 1) {
+            return line.fontSize >= bodyFontSize + 0.5 || /^[0-9.]+\s+[A-Z0-9 .&()/\-]+$/.test(line.text);
+        }
+
+        return line.fontSize >= bodyFontSize - 0.5 && line.text.length < 140;
+    }
+
+    if (isRomanSectionHeading(line.text) || isLetteredSectionHeading(line.text)) {
+        return line.fontSize >= bodyFontSize - 0.5 && line.text.length < 140;
     }
 
     return (
@@ -406,6 +452,20 @@ function isHeadingLine(line: TextLine, bodyFontSize: number) {
         !/^\d/.test(line.text) &&
         !/[$+]/.test(line.text) &&
         /^[A-Z][A-Z0-9 .&()/\-]+$/.test(line.text)
+    );
+}
+
+function looksLikeHeadingContinuation(headText: string, text: string) {
+    let firstWord = text.trim().split(/\s+/, 1)[0] ?? "";
+    let lastHeadWord = headText.trim().split(/\s+/).pop() ?? "";
+    let headEndsWithFragment = /^[A-Z]$/.test(lastHeadWord) || /\d/.test(lastHeadWord);
+
+    return (
+        /^[A-Z0-9][A-Z0-9&()/\-]*$/.test(firstWord) && firstWord.length > 1 ||
+        /\b[A-Z]$/.test(headText) && /^[a-z]/.test(firstWord) ||
+        headEndsWithFragment && /^[A-Z][a-z]/.test(firstWord) ||
+        headEndsWithFragment && /^-/.test(firstWord) ||
+        /^and\s+[A-Z0-9]/.test(text.trim())
     );
 }
 
@@ -422,7 +482,8 @@ function splitHeadingLines(lines: TextLine[], bodyFontSize: number) {
             if (
                 isHeadingText(headText) &&
                 bodyText.length > 0 &&
-                part.fontSize <= bodyFontSize + 0.3
+                part.fontSize <= bodyFontSize + 0.3 &&
+                !looksLikeHeadingContinuation(headText, bodyText)
             ) {
                 splitAt = i;
                 break;
@@ -597,10 +658,6 @@ function isParagraphLikeLine(line: TextLine, bodyFontSize: number, columnWidth: 
         line.width > columnWidth * 0.85 &&
         line.text.length > 55
     );
-}
-
-function isLetteredSectionHeading(text: string) {
-    return /^[A-Z]\.\s+[A-Z0-9]/.test(text);
 }
 
 // キャプション継続行は、キャプション先頭と近いフォント・近い位置に出ることが多い。
