@@ -908,7 +908,7 @@ export function nodesToHTML(nodes: PDF_Node[]) {
     <style>
         main { max-width: 760px; margin: 0 auto; line-height: 1.55; }
         figure { margin: 1.5rem 0; }
-        figure img { display: block; max-width: 100%; height: auto; margin: 0 auto 0.5rem; }
+        figure img { display: block; max-width: 88%; height: auto; margin: 0 auto 0.5rem; }
         figcaption { font-size: 0.92rem; color: #333; }
     </style>
 </head>

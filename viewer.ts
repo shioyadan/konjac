@@ -8,7 +8,7 @@ pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/
 
 console.log("initialized.");
 
-const FIGURE_RENDER_SCALE = 2.0;
+const FIGURE_RENDER_SCALE = 4.0;
 
 interface RenderedPageCanvas {
     canvas: HTMLCanvasElement;
@@ -110,6 +110,10 @@ function show(nodes: PDF_Node[]) {
                 let image = document.createElement("img");
                 image.src = node.imageSrc;
                 image.alt = node.str;
+                image.style.display = "block";
+                image.style.maxWidth = "88%";
+                image.style.height = "auto";
+                image.style.margin = "0 auto 0.5rem";
                 figure.appendChild(image);
             }
 

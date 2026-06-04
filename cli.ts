@@ -29,7 +29,7 @@ interface RenderedPageCanvas {
 const {createCanvas} = require("canvas") as {
     createCanvas: (width: number, height: number) => NodeCanvasLike;
 };
-const FIGURE_RENDER_SCALE = 2.0;
+const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
     console.error("usage: node dist/cli.cjs [--html|--json] <pdf-file>");
