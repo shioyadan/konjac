@@ -8,7 +8,8 @@
 //   4. ページ番号などの一般的な装飾を落とし、読み順を 2 段組み前提で整える。
 //   5. Figure/Table キャプションから図表領域を粗く推定し、その領域内の文字行を本文から外す。
 //   6. フォントサイズと文字列パターンから title/heading/figure/text に分類する。
-//   7. 連続する本文行を段落にまとめ、HTML タグへ対応づける。
+//   7. 連続する本文行を段落にまとめる。
+//   8. 図表をまたいで分割された段落を結合し、HTML タグへ対応づける。
 
 export enum PDF_NodeType {
     // 通常の本文段落。
@@ -599,6 +600,106 @@ function appendLineText(base: string, next: string) {
     return `${base} ${next}`;
 }
 
+// 句点などで明確に文が終わっていれば、図表の前後を同じ段落として結合しない。
+function paragraphEndsWithSentenceStop(text: string) {
+    return /[.!?)]["']*$/.test(text.trim());
+}
+
+// 図表・観察項目・章節見出しらしい始まりは、新しいブロックとして扱う。
+function startsLikeNewBlock(text: string) {
+    let trimmed = text.trim();
+    return (
+        /^(?:Figure|Fig\.|Table)\s+/i.test(trimmed) ||
+        /^Observation-\d+/.test(trimmed) ||
+        /^(?:[A-Z]|[IVX]+)\.\s+/.test(trimmed)
+    );
+}
+
+// 小文字や数字で始まる十分な長さのテキストは、直前の文の続きである可能性が高い。
+// 1 文字程度の断片は図中ラベル由来のことがあるため、継続根拠にはしない。
+function startsLikeParagraphContinuation(text: string) {
+    let trimmed = text.trim();
+    return trimmed.length > 2 && /^[("']?[a-z0-9]/.test(trimmed);
+}
+
+// 前半が前置詞や接続詞などで終わる場合、次のテキストを同じ文の続きとみなしやすい。
+function endsWithOpenPhrase(text: string) {
+    return /(?:[-,;:]|\b(?:and|or|of|the|a|an|to|in|on|for|with|without|by|from|as|than|that|which|when|where|while|because|using|between|into|across|only|most|all))$/i.test(text.trim());
+}
+
+// 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
+function looksLikeInterruptedParagraph(before: string, after: string) {
+    if (before.trim() == "" || after.trim() == "" || startsLikeNewBlock(after)) {
+        return false;
+    }
+
+    if (before.trim().endsWith("-")) {
+        return true;
+    }
+
+    if (paragraphEndsWithSentenceStop(before)) {
+        return false;
+    }
+
+    return startsLikeParagraphContinuation(after) || endsWithOpenPhrase(before);
+}
+
+// 図表が段落の途中に挿入された場合、本文を結合して図表を段落の直後へ寄せる。
+function moveInterruptedFiguresAfterParagraphs(nodes: PDF_Node[]) {
+    let result: PDF_Node[] = [];
+
+    for (let i = 0; i < nodes.length; i++) {
+        let node = nodes[i];
+        if (node.type != PDF_NodeType.TEXT) {
+            result.push(node);
+            continue;
+        }
+
+        let text = node.str;
+        let delayedFigures: PDF_Node[] = [];
+        let cursor = i;
+
+        while (true) {
+            // TEXT の直後に連続する FIGURE 群を探し、その次が続きの TEXT なら本文を先に結合する。
+            let figureStart = cursor + 1;
+            let nextTextIndex = figureStart;
+            while (nodes[nextTextIndex]?.type == PDF_NodeType.FIGURE) {
+                nextTextIndex++;
+            }
+
+            let figures = nodes.slice(figureStart, nextTextIndex);
+            let nextText = nodes[nextTextIndex];
+            if (
+                figures.length == 0 ||
+                !nextText ||
+                nextText.type != PDF_NodeType.TEXT ||
+                !looksLikeInterruptedParagraph(text, nextText.str)
+            ) {
+                break;
+            }
+
+            text = appendLineText(text, nextText.str);
+            delayedFigures.push(...figures);
+            cursor = nextTextIndex;
+        }
+
+        // 図表を後ろへ寄せたことで、続けて隣接した TEXT も同じ段落ならまとめる。
+        while (
+            delayedFigures.length > 0 &&
+            nodes[cursor + 1]?.type == PDF_NodeType.TEXT &&
+            looksLikeInterruptedParagraph(text, nodes[cursor + 1].str)
+        ) {
+            text = appendLineText(text, nodes[cursor + 1].str);
+            cursor++;
+        }
+
+        result.push(new PDF_Node(text, PDF_NodeType.TEXT), ...delayedFigures);
+        i = cursor;
+    }
+
+    return result;
+}
+
 function captionLooksComplete(caption: string) {
     return /[.!?)]$/.test(caption) || TABLE_CAPTION_WITH_TITLE_PATTERN.test(caption);
 }
@@ -1039,7 +1140,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
 
     flushTitle();
     flushParagraph();
-    return nodes;
+    return moveInterruptedFiguresAfterParagraphs(nodes);
 }
 
 // 旧 API 互換: 1 ページ分の TextItem だけから抽出する。
