@@ -455,6 +455,23 @@ function isHeadingLine(line: TextLine, bodyFontSize: number) {
     );
 }
 
+function headingHTMLElementName(text: string) {
+    let arabicNumbers = arabicSectionNumbers(text);
+    if (arabicNumbers) {
+        return `h${Math.min(arabicNumbers.length + 1, 4)}`;
+    }
+
+    if (isRomanSectionHeading(text)) {
+        return "h2";
+    }
+
+    if (isLetteredSectionHeading(text)) {
+        return "h3";
+    }
+
+    return "h2";
+}
+
 function looksLikeHeadingContinuation(headText: string, text: string) {
     let firstWord = text.trim().split(/\s+/, 1)[0] ?? "";
     let lastHeadWord = headText.trim().split(/\s+/).pop() ?? "";
@@ -955,7 +972,7 @@ export function nodeToHTMLElementName(node: PDF_Node) {
         case PDF_NodeType.TITLE:
             return "h1";
         case PDF_NodeType.HEADING:
-            return "h2";
+            return headingHTMLElementName(node.str);
         case PDF_NodeType.CAPTION:
             return "figcaption";
         case PDF_NodeType.FIGURE:
