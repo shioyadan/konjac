@@ -9,6 +9,9 @@ module.exports = {
         filename: "cli.cjs"
     },
     target: "node",
+    externals: {
+        canvas: "commonjs canvas"
+    },
     module: {
         rules: [
             {

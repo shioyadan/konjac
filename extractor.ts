@@ -6,8 +6,9 @@
 //   2. y 座標と x 座標から TextLine を復元する。
 //   3. 文書全体から本文フォントサイズと本文幅を推定する。
 //   4. ページ番号などの一般的な装飾を落とし、読み順を 2 段組み前提で整える。
-//   5. フォントサイズと文字列パターンから title/heading/caption/text に分類する。
-//   6. 連続する本文行を段落にまとめ、HTML タグへ対応づける。
+//   5. Figure/Table キャプションから図表領域を粗く推定し、その領域内の文字行を本文から外す。
+//   6. フォントサイズと文字列パターンから title/heading/figure/text に分類する。
+//   7. 連続する本文行を段落にまとめ、HTML タグへ対応づける。
 
 export enum PDF_NodeType {
     // 通常の本文段落。
@@ -17,19 +18,52 @@ export enum PDF_NodeType {
     // ABSTRACT や章・節見出し。
     HEADING = 3,
     // Figure/Table のキャプション。
-    CAPTION = 4
+    CAPTION = 4,
+    // Figure/Table を PDF ページから切り出して表示するためのノード。
+    FIGURE = 5
 };
+
+// PDF ページ上の矩形。PDF.js の page.render で切り出すため、座標系は PDF と同じ左下原点。
+export interface PDF_Rect {
+    // 1 始まりのページ番号。
+    page: number;
+    // 矩形左下の x 座標。
+    x: number;
+    // 矩形左下の y 座標。
+    y: number;
+    // 矩形の幅。
+    width: number;
+    // 矩形の高さ。
+    height: number;
+}
+
+// 1 ページ分の入力。既存 API 互換のため unknown[] だけを渡すこともできる。
+export interface PDF_PageInput {
+    // PDF.js の getTextContent().items。
+    items: unknown[];
+    // page.getViewport({scale: 1}).width。未指定なら本文座標から推定する。
+    width?: number;
+    // page.getViewport({scale: 1}).height。未指定なら本文座標から推定する。
+    height?: number;
+}
 
 // HTML に変換する前の構造ノード。
 export class PDF_Node {
     // ノード内のプレーンテキスト。
     str: string;
-    // 本文、タイトル、見出し、キャプションの種別。
+    // 本文、タイトル、見出し、キャプション、図表の種別。
     type: PDF_NodeType;
+    // 図表ノードの場合、PDF ページから切り出す矩形。
+    rect?: PDF_Rect;
+    // CLI/viewer が rect から生成した画像。extractor 自体は画像生成を行わない。
+    imageSrc?: string;
 
-    constructor(str: string, type: PDF_NodeType) {
+    constructor(str: string, type: PDF_NodeType, rect?: PDF_Rect) {
         this.str = str;
         this.type = type;
+        if (rect) {
+            this.rect = rect;
+        }
     }
 };
 
@@ -79,6 +113,30 @@ interface TextLine {
     fontSize: number;
     // この行を構成する元の文字片。
     parts: TextPart[];
+}
+
+// ページごとの大きさと本文領域の概算。
+interface PageMetrics {
+    // 1 始まりのページ番号。
+    page: number;
+    // PDF ページ幅。
+    width: number;
+    // PDF ページ高さ。
+    height: number;
+    // TextLine から見た本文左端。
+    minX: number;
+    // TextLine から見た本文右端。
+    maxX: number;
+}
+
+// キャプションから推定した図表ノードと、そのキャプション行の範囲。
+interface FigureCandidate {
+    // 読み順配列でのキャプション先頭行。
+    startIndex: number;
+    // 複数行キャプションの最終行。
+    endIndex: number;
+    // 出力する図表ノード。
+    node: PDF_Node;
 }
 
 // 同じ行とみなす y 座標差の許容値。
@@ -237,6 +295,64 @@ function median(values: number[], fallback: number) {
     return sorted[Math.floor(sorted.length / 2)];
 }
 
+function pageItems(page: unknown[] | PDF_PageInput) {
+    return Array.isArray(page) ? page : page.items;
+}
+
+function finiteNumber(value: unknown): value is number {
+    return typeof value == "number" && Number.isFinite(value);
+}
+
+// 呼び出し側から渡されたページサイズを優先し、なければ TextLine の座標から概算する。
+function estimatePageMetrics(lines: TextLine[], pages: Array<unknown[] | PDF_PageInput>) {
+    let metrics = new Map<number, PageMetrics>();
+
+    for (let i = 0; i < pages.length; i++) {
+        let page = pages[i];
+        let width = !Array.isArray(page) && finiteNumber(page.width) ? page.width : 612;
+        let height = !Array.isArray(page) && finiteNumber(page.height) ? page.height : 792;
+        metrics.set(i + 1, {
+            page: i + 1,
+            width,
+            height,
+            minX: Number.POSITIVE_INFINITY,
+            maxX: 0
+        });
+    }
+
+    for (let line of lines) {
+        let metric = metrics.get(line.page);
+        if (!metric) {
+            metric = {
+                page: line.page,
+                width: 612,
+                height: 792,
+                minX: Number.POSITIVE_INFINITY,
+                maxX: 0
+            };
+            metrics.set(line.page, metric);
+        }
+
+        metric.minX = Math.min(metric.minX, line.x);
+        metric.maxX = Math.max(metric.maxX, line.x + line.width);
+        if (!finiteNumber((pages[line.page - 1] as PDF_PageInput | undefined)?.width)) {
+            metric.width = Math.max(metric.width, line.x + line.width + 36);
+        }
+        if (!finiteNumber((pages[line.page - 1] as PDF_PageInput | undefined)?.height)) {
+            metric.height = Math.max(metric.height, line.y + line.fontSize + 36);
+        }
+    }
+
+    for (let metric of metrics.values()) {
+        if (!Number.isFinite(metric.minX)) {
+            metric.minX = 36;
+            metric.maxX = metric.width - 36;
+        }
+    }
+
+    return metrics;
+}
+
 // ページ番号など、論文本体ではない固定要素を落とす。
 function isPageDecoration(line: TextLine) {
     return /^\d+$/.test(line.text) && line.fontSize <= 12;
@@ -245,6 +361,10 @@ function isPageDecoration(line: TextLine) {
 // 図表キャプションの先頭行を検出する。
 function isCaptionLine(line: TextLine) {
     return /^(?:Figure|Table)\s+\d+\s*[:.]/.test(line.text);
+}
+
+function isTableCaption(text: string) {
+    return /^Table\s+\d+\s*[:.]/.test(text);
 }
 
 // 1 ページ目で本文より十分大きい行を論文タイトル候補とする。
@@ -396,9 +516,244 @@ function appendLineText(base: string, next: string) {
     return `${base} ${next}`;
 }
 
-// 抽出の中心処理。ページごとの TextItem から、タイトル・見出し・本文・キャプションを作る。
-export function extractNodesFromPages(pages: unknown[][]) {
-    let lines = pages.flatMap((textItems, index) => buildLinesForPage(textItems, index + 1));
+function captionLooksComplete(caption: string) {
+    return /[.!?)]$/.test(caption);
+}
+
+function clamp(value: number, minValue: number, maxValue: number) {
+    return Math.max(minValue, Math.min(value, maxValue));
+}
+
+// キャプション行を基準に、Figure は上側、Table は下側を図表領域として切り出す。
+// これは一般的な論文レイアウト向けの経験則で、個別 PDF 固有の文字列には依存しない。
+function estimateFigureRect(caption: string, line: TextLine, columnWidth: number, metric: PageMetrics) {
+    let pageMargin = 36;
+    let padding = Math.max(6, line.fontSize * 0.8);
+    let isWide = line.width > columnWidth * 1.25 || line.width > metric.width * 0.48;
+    let x = isWide ? Math.max(pageMargin, metric.minX - 4) : Math.max(pageMargin, line.x - 4);
+    let width = isWide
+        ? Math.min(metric.width - x - pageMargin, Math.max(metric.maxX - x + 4, line.width + padding * 2))
+        : Math.min(metric.width - x - pageMargin, Math.max(columnWidth + padding, line.width + padding * 2));
+
+    let heightLimit = isTableCaption(caption)
+        ? Math.min(metric.height * 0.14, 95)
+        : Math.min(metric.height * 0.34, 240);
+    let y = 0;
+    let height = 0;
+
+    if (isTableCaption(caption)) {
+        let top = line.y - line.fontSize - padding;
+        height = Math.min(heightLimit, Math.max(0, top - pageMargin));
+        y = top - height;
+    }
+    else {
+        y = line.y + line.fontSize + padding;
+        height = Math.min(heightLimit, Math.max(0, metric.height - pageMargin - y));
+    }
+
+    x = clamp(x, 0, metric.width);
+    y = clamp(y, 0, metric.height);
+    width = clamp(width, 0, metric.width - x);
+    height = clamp(height, 0, metric.height - y);
+
+    if (width < 24 || height < 24) {
+        return null;
+    }
+
+    return {
+        page: line.page,
+        x,
+        y,
+        width,
+        height
+    };
+}
+
+function isParagraphLikeLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    return (
+        Math.abs(line.fontSize - bodyFontSize) < 1.0 &&
+        line.width > columnWidth * 0.85 &&
+        line.text.length > 55
+    );
+}
+
+function isLetteredSectionHeading(text: string) {
+    return /^[A-Z]\.\s+[A-Z0-9]/.test(text);
+}
+
+// キャプション継続行は、キャプション先頭と近いフォント・近い位置に出ることが多い。
+// 本文段落や節見出しらしい行に入ったら、キャプションの過剰連結を避けるため止める。
+function isLikelyCaptionContinuationLine(
+    captionLine: TextLine,
+    prevLine: TextLine,
+    nextLine: TextLine,
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    if (nextLine.page != captionLine.page) {
+        return false;
+    }
+
+    if (isLetteredSectionHeading(nextLine.text)) {
+        return false;
+    }
+
+    let sameColumn = Math.abs(nextLine.x - captionLine.x) < columnWidth * 0.6;
+    let closeLineGap = Math.abs(prevLine.y - nextLine.y) <= Math.max(bodyFontSize * 1.8, captionLine.fontSize * 2.2);
+    let compatibleFont = nextLine.fontSize <= captionLine.fontSize + 0.8;
+
+    if (prevLine.text.endsWith("-")) {
+        return sameColumn && closeLineGap && compatibleFont;
+    }
+
+    if (
+        nextLine.fontSize >= bodyFontSize - 0.2 &&
+        isParagraphLikeLine(nextLine, bodyFontSize, columnWidth)
+    ) {
+        return false;
+    }
+
+    return sameColumn && closeLineGap && compatibleFont;
+}
+
+// Table では下側に本文が続くことが多いため、crop 内で本文らしい行が現れたら直前で切る。
+function trimTableRectAtBodyText(rect: PDF_Rect, lines: TextLine[], captionEndIndex: number, bodyFontSize: number, columnWidth: number) {
+    let top = rect.y + rect.height;
+
+    for (let i = captionEndIndex + 1; i < lines.length; i++) {
+        let line = lines[i];
+        if (line.page != rect.page) {
+            break;
+        }
+
+        if (line.y > top || line.y < rect.y) {
+            continue;
+        }
+
+        if (!isParagraphLikeLine(line, bodyFontSize, columnWidth)) {
+            continue;
+        }
+
+        let bottom = clamp(line.y + line.fontSize + Math.max(6, line.fontSize), rect.y, top - 24);
+        return {
+            ...rect,
+            y: bottom,
+            height: top - bottom
+        };
+    }
+
+    return rect;
+}
+
+// Figure 内の軸ラベルや凡例は本文より小さいフォントで抽出されることが多い。
+// その分布を使って、固定高さの crop が本文やタイトルを巻き込む場合を抑える。
+function fitFigureRectToInnerText(rect: PDF_Rect, lines: TextLine[], bodyFontSize: number, columnWidth: number, metric: PageMetrics) {
+    let top = rect.y + rect.height;
+    let innerLines = lines.filter((line) =>
+        line.page == rect.page &&
+        line.y >= rect.y &&
+        line.y <= top &&
+        line.fontSize < bodyFontSize - 0.8 &&
+        line.text.length > 1
+    );
+
+    if (innerLines.length < 2) {
+        return rect;
+    }
+
+    let pageMargin = 36;
+    let minX = Math.min(...innerLines.map((line) => line.x));
+    let maxX = Math.max(...innerLines.map((line) => line.x + line.width));
+    let maxY = Math.max(...innerLines.map((line) => line.y + line.fontSize));
+    let expandableMinX = rect.x - minX < columnWidth * 0.75 ? minX : rect.x;
+    let expandableMaxX = maxX - (rect.x + rect.width) < columnWidth * 0.75 ? maxX : rect.x + rect.width;
+    let x = Math.min(rect.x, expandableMinX - 24);
+    let right = Math.max(rect.x + rect.width, expandableMaxX + 24);
+    let trimmedTop = Math.min(top, maxY + 18);
+
+    x = clamp(x, pageMargin, metric.width - pageMargin);
+    right = clamp(right, x + 24, metric.width - pageMargin);
+    trimmedTop = clamp(trimmedTop, rect.y + 24, top);
+
+    return {
+        ...rect,
+        x,
+        width: right - x,
+        height: trimmedTop - rect.y
+    };
+}
+
+// 読み順に並んだ行から、キャプションと図表領域を先に集める。
+function collectFigureCandidates(lines: TextLine[], bodyFontSize: number, columnWidth: number, pageMetrics: Map<number, PageMetrics>) {
+    let candidates: FigureCandidate[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+        if (!isCaptionLine(line)) {
+            continue;
+        }
+
+        let caption = line.text;
+        let endIndex = i;
+        let captionLines = 1;
+        while (!captionLooksComplete(caption) && captionLines < 20 && endIndex + 1 < lines.length) {
+            let next = lines[endIndex + 1];
+            if (
+                isCaptionLine(next) ||
+                isTitleLine(next, bodyFontSize) ||
+                isHeadingLine(next, bodyFontSize) ||
+                !isLikelyCaptionContinuationLine(line, lines[endIndex], next, bodyFontSize, columnWidth)
+            ) {
+                break;
+            }
+
+            caption = appendLineText(caption, next.text);
+            endIndex++;
+            captionLines++;
+        }
+
+        let metric = pageMetrics.get(line.page);
+        if (!metric) {
+            continue;
+        }
+
+        let rect = estimateFigureRect(caption, line, columnWidth, metric);
+        if (rect && isTableCaption(caption)) {
+            rect = trimTableRectAtBodyText(rect, lines, endIndex, bodyFontSize, columnWidth);
+        }
+        else if (rect) {
+            rect = fitFigureRectToInnerText(rect, lines, bodyFontSize, columnWidth, metric);
+        }
+
+        candidates.push({
+            startIndex: i,
+            endIndex,
+            node: new PDF_Node(caption, PDF_NodeType.FIGURE, rect ?? undefined)
+        });
+    }
+
+    return candidates;
+}
+
+function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
+    if (line.page != rect.page) {
+        return false;
+    }
+
+    let centerX = line.x + line.width / 2;
+    let centerY = line.y + line.fontSize / 2;
+    return (
+        centerX >= rect.x &&
+        centerX <= rect.x + rect.width &&
+        centerY >= rect.y &&
+        centerY <= rect.y + rect.height
+    );
+}
+
+// 抽出の中心処理。ページごとの TextItem から、タイトル・見出し・本文・図表を作る。
+export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
+    // TextItem をページごとの行へ復元し、文書全体の本文らしいサイズを推定する。
+    let lines = pages.flatMap((page, index) => buildLinesForPage(pageItems(page), index + 1));
     let bodyFontSize = estimateBodyFontSize(lines);
 
     // 本文幅の代表値を使って、カラム移動や短い行による段落切れを判定する。
@@ -409,16 +764,33 @@ export function extractNodesFromPages(pages: unknown[][]) {
         240
     );
 
+    // 図表を画像として切り出すため、PDF ページ寸法と本文領域を用意する。
+    let pageMetrics = estimatePageMetrics(lines, pages);
+
     // 行単位の前処理: 見出し分割、ページ番号除去、本文サイズから外れすぎた行の除外。
     lines = splitHeadingLines(lines, bodyFontSize)
         .filter((line) => line.text != "")
         .filter((line) => !isPageDecoration(line))
         .filter((line) => line.fontSize >= bodyFontSize - 1.2 || isCaptionLine(line) || isHeadingLine(line, bodyFontSize));
 
+    // 読み順にした行から Figure/Table を先に集め、後続の本文抽出で除外できる形にする。
+    let readingLines = sortLinesForReading(lines);
+    let figures = collectFigureCandidates(readingLines, bodyFontSize, columnWidth, pageMetrics);
+    let figureByStart = new Map(figures.map((figure) => [figure.startIndex, figure]));
+    let captionLineIndices = new Set<number>();
+    let figureRects = figures
+        .map((figure) => figure.node.rect)
+        .filter((rect): rect is PDF_Rect => rect != null);
+
+    // 複数行キャプションは FIGURE ノードにまとめるので、元の行は本文候補から外す。
+    for (let figure of figures) {
+        for (let i = figure.startIndex; i <= figure.endIndex; i++) {
+            captionLineIndices.add(i);
+        }
+    }
+
     let nodes: PDF_Node[] = [];
     let title = "";
-    let caption = "";
-    let captionLines = 0;
     let paragraph = "";
     let prevTextLine: TextLine | null = null;
 
@@ -430,15 +802,6 @@ export function extractNodesFromPages(pages: unknown[][]) {
         }
     }
 
-    // 複数行キャプションを 1 つの figcaption にまとめる。
-    function flushCaption() {
-        if (caption != "") {
-            nodes.push(new PDF_Node(caption, PDF_NodeType.CAPTION));
-            caption = "";
-            captionLines = 0;
-        }
-    }
-
     // 連結中の本文段落を確定する。
     function flushParagraph() {
         if (paragraph != "") {
@@ -447,38 +810,35 @@ export function extractNodesFromPages(pages: unknown[][]) {
         }
     }
 
-    // 読み順に並べ直した行を、順に構造ノードへ変換する。
-    for (let line of sortLinesForReading(lines)) {
+    // キャプション行と図表矩形内の行を飛ばしながら、残りを構造ノードへ変換する。
+    for (let i = 0; i < readingLines.length; i++) {
+        let line = readingLines[i];
+        let figure = figureByStart.get(i);
+        if (figure) {
+            flushTitle();
+            flushParagraph();
+            nodes.push(figure.node);
+            prevTextLine = null;
+            continue;
+        }
+
+        if (
+            captionLineIndices.has(i) ||
+            figureRects.some((rect) => lineCenterInsideRect(line, rect))
+        ) {
+            prevTextLine = null;
+            continue;
+        }
+
         if (isTitleLine(line, bodyFontSize)) {
             flushParagraph();
-            flushCaption();
             title = appendLineText(title, line.text);
             prevTextLine = null;
         }
         else if (isHeadingLine(line, bodyFontSize)) {
             flushTitle();
             flushParagraph();
-            flushCaption();
             nodes.push(new PDF_Node(line.text, PDF_NodeType.HEADING));
-            prevTextLine = null;
-        }
-        else if (isCaptionLine(line)) {
-            flushTitle();
-            flushParagraph();
-            flushCaption();
-            caption = line.text;
-            captionLines = 1;
-            if (/[.!?)]$/.test(caption)) {
-                flushCaption();
-            }
-            prevTextLine = null;
-        }
-        else if (caption != "") {
-            caption = appendLineText(caption, line.text);
-            captionLines++;
-            if (/[.!?)]$/.test(caption) || captionLines >= 20) {
-                flushCaption();
-            }
             prevTextLine = null;
         }
         else {
@@ -492,7 +852,6 @@ export function extractNodesFromPages(pages: unknown[][]) {
     }
 
     flushTitle();
-    flushCaption();
     flushParagraph();
     return nodes;
 }
@@ -520,6 +879,8 @@ export function nodeToHTMLElementName(node: PDF_Node) {
             return "h2";
         case PDF_NodeType.CAPTION:
             return "figcaption";
+        case PDF_NodeType.FIGURE:
+            return "figure";
         default:
             return "p";
     }
@@ -528,6 +889,13 @@ export function nodeToHTMLElementName(node: PDF_Node) {
 // CLI 出力用の最小 HTML を生成する。
 export function nodesToHTML(nodes: PDF_Node[]) {
     let body = nodes.map((node) => {
+        if (node.type == PDF_NodeType.FIGURE) {
+            let image = node.imageSrc
+                ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}">`
+                : "";
+            return `<figure>${image}<figcaption>${escapeHTML(node.str)}</figcaption></figure>`;
+        }
+
         let tag = nodeToHTMLElementName(node);
         return `<${tag}>${escapeHTML(node.str)}</${tag}>`;
     }).join("\n");
@@ -537,6 +905,12 @@ export function nodesToHTML(nodes: PDF_Node[]) {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        main { max-width: 760px; margin: 0 auto; line-height: 1.55; }
+        figure { margin: 1.5rem 0; }
+        figure img { display: block; max-width: 100%; height: auto; margin: 0 auto 0.5rem; }
+        figcaption { font-size: 0.92rem; color: #333; }
+    </style>
 </head>
 <body>
 <main>
