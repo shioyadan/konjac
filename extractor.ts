@@ -1081,6 +1081,7 @@ function fitFigureRectToInnerText(rect: PDF_Rect, lines: TextLine[], bodyFontSiz
         line.page == rect.page &&
         line.y >= rect.y &&
         line.y <= top &&
+        lineCenterHorizontallyInsideRect(line, rect, 12) &&
         line.fontSize < bodyFontSize - 0.8 &&
         line.text.length > 1
     );
@@ -1098,15 +1099,79 @@ function fitFigureRectToInnerText(rect: PDF_Rect, lines: TextLine[], bodyFontSiz
     let x = Math.min(rect.x, expandableMinX - 24);
     let right = Math.max(rect.x + rect.width, expandableMaxX + 24);
     let trimmedTop = Math.min(top, maxY + 18);
+    let isWide = rect.width > columnWidth * 1.25 || rect.width > metric.width * 0.48;
 
     x = clamp(x, pageMargin, metric.width - pageMargin);
     right = clamp(right, x + 24, metric.width - pageMargin);
+    if (!isWide && rect.x < metric.width / 2) {
+        let rightColumnLeft = Math.max(metric.width / 2, metric.maxX - columnWidth);
+        right = clamp(Math.min(right, rightColumnLeft - 8), x + 24, metric.width - pageMargin);
+    }
     trimmedTop = clamp(trimmedTop, rect.y + 24, top);
 
     return {
         ...rect,
         x,
         width: right - x,
+        height: trimmedTop - rect.y
+    };
+}
+
+// Figure が縦に続くページでは、現在の Figure の上側候補に直前 Figure のキャプションが入ることがある。
+// 候補内に別のキャプションを見つけたら、その直下で上端を切り、前の図を巻き込まないようにする。
+function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], bodyFontSize: number, columnWidth: number) {
+    let top = rect.y + rect.height;
+    let previousCaption = lines
+        .filter((line) =>
+            line.page == rect.page &&
+            line.y > rect.y &&
+            line.y < top &&
+            (isCaptionLine(line, bodyFontSize, columnWidth) || isAlgorithmCaptionLine(line))
+        )
+        .sort((a, b) => a.y - b.y)[0];
+
+    if (!previousCaption) {
+        return rect;
+    }
+
+    let captionBottom = previousCaption.y;
+    let prevLine = previousCaption;
+    let captionText = previousCaption.text;
+    let possibleContinuationLines = lines
+        .filter((line) =>
+            line.page == rect.page &&
+            line.y < previousCaption.y &&
+            line.y > rect.y
+        )
+        .sort((a, b) => b.y - a.y);
+
+    for (let line of possibleContinuationLines) {
+        if (Math.abs(line.x - previousCaption.x) >= columnWidth * 0.6) {
+            continue;
+        }
+
+        if (captionLooksComplete(captionText)) {
+            break;
+        }
+
+        if (!isLikelyCaptionContinuationLine(previousCaption, prevLine, line, bodyFontSize, columnWidth)) {
+            break;
+        }
+
+        captionText = appendLineText(captionText, line.text);
+        captionBottom = line.y;
+        prevLine = line;
+    }
+
+    // 複数行キャプションの続きも落とすため、キャプションブロックの少し下まで余白を取る。
+    let trimmedTop = clamp(
+        captionBottom - Math.max(bodyFontSize * 0.8, 8),
+        rect.y + 24,
+        top
+    );
+
+    return {
+        ...rect,
         height: trimmedTop - rect.y
     };
 }
@@ -1239,6 +1304,7 @@ function collectFigureCandidates(lines: TextLine[], bodyFontSize: number, column
                 trimTableRectAtBodyText(rect, lines, endIndex, bodyFontSize, columnWidth);
         }
         else if (rect) {
+            rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = fitFigureRectToInnerText(rect, lines, bodyFontSize, columnWidth, metric);
         }
 
@@ -1265,6 +1331,15 @@ function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
         centerY >= rect.y &&
         centerY <= rect.y + rect.height
     );
+}
+
+function lineCenterHorizontallyInsideRect(line: TextLine, rect: PDF_Rect, margin: number) {
+    if (line.page != rect.page) {
+        return false;
+    }
+
+    let centerX = line.x + line.width / 2;
+    return centerX >= rect.x - margin && centerX <= rect.x + rect.width + margin;
 }
 
 // 抽出の中心処理。ページごとの TextItem から、タイトル・見出し・本文・図表を作る。
