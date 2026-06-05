@@ -38,10 +38,20 @@ export interface PDF_Rect {
     height: number;
 }
 
+// PDF の描画命令から取り出した線・パス・画像などの外接矩形。
+export interface PDF_GraphicObject extends PDF_Rect {
+    // 描画命令のおおまかな種類。
+    kind: "path" | "image" | "form";
+    // 線幅。パスの bbox が 0 幅/高さになる場合の補正に使う。
+    strokeWidth?: number;
+}
+
 // 1 ページ分の入力。既存 API 互換のため unknown[] だけを渡すこともできる。
 export interface PDF_PageInput {
     // PDF.js の getTextContent().items。
     items: unknown[];
+    // PDF.js の getOperatorList() から得た描画オブジェクト。
+    graphics?: PDF_GraphicObject[];
     // page.getViewport({scale: 1}).width。未指定なら本文座標から推定する。
     width?: number;
     // page.getViewport({scale: 1}).height。未指定なら本文座標から推定する。
@@ -140,10 +150,179 @@ interface FigureCandidate {
     node: PDF_Node;
 }
 
+type Matrix = [number, number, number, number, number, number];
+
 // 同じ行とみなす y 座標差の許容値。
 const LINE_Y_EPSILON = 2.0;
 // 同一 y 座標上で別行・別カラムとみなす横方向の隙間。
 const COLUMN_GAP = 14.0;
+const IDENTITY_MATRIX: Matrix = [1, 0, 0, 1, 0, 0];
+
+function multiplyMatrix(a: Matrix, b: Matrix): Matrix {
+    return [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5]
+    ];
+}
+
+function asMatrix(value: unknown): Matrix {
+    let m = Array.isArray(value) ? value : [];
+    return [
+        Number(m[0] ?? 1), Number(m[1] ?? 0), Number(m[2] ?? 0),
+        Number(m[3] ?? 1), Number(m[4] ?? 0), Number(m[5] ?? 0)
+    ];
+}
+
+function transformPoint(m: Matrix, x: number, y: number) {
+    return {
+        x: m[0] * x + m[2] * y + m[4],
+        y: m[1] * x + m[3] * y + m[5]
+    };
+}
+
+function transformBox(page: number, m: Matrix, box: number[], lineWidth: number, kind: PDF_GraphicObject["kind"]) {
+    if (box.length < 4 || !box.every(Number.isFinite)) {
+        return null;
+    }
+
+    let points = [
+        transformPoint(m, box[0], box[1]),
+        transformPoint(m, box[2], box[1]),
+        transformPoint(m, box[2], box[3]),
+        transformPoint(m, box[0], box[3])
+    ];
+    let minX = Math.min(...points.map((p) => p.x)) - lineWidth / 2;
+    let maxX = Math.max(...points.map((p) => p.x)) + lineWidth / 2;
+    let minY = Math.min(...points.map((p) => p.y)) - lineWidth / 2;
+    let maxY = Math.max(...points.map((p) => p.y)) + lineWidth / 2;
+
+    if (maxX <= minX || maxY <= minY) {
+        return null;
+    }
+
+    return {page, kind, x: minX, y: minY, width: maxX - minX, height: maxY - minY, strokeWidth: lineWidth};
+}
+
+function unionGraphicBox(a: PDF_GraphicObject | null, b: PDF_GraphicObject | null) {
+    if (!a) {
+        return b;
+    }
+    if (!b) {
+        return a;
+    }
+
+    let x = Math.min(a.x, b.x);
+    let y = Math.min(a.y, b.y);
+    let right = Math.max(a.x + a.width, b.x + b.width);
+    let top = Math.max(a.y + a.height, b.y + b.height);
+    return {...a, x, y, width: right - x, height: top - y};
+}
+
+function operatorPathBox(args: unknown[]) {
+    let explicitBox = args[2];
+    if (Array.isArray(explicitBox) && explicitBox.length >= 4) {
+        return explicitBox.map(Number).slice(0, 4);
+    }
+
+    let coords = Array.isArray(args[1]) ? args[1].map(Number).filter(Number.isFinite) : [];
+    if (coords.length < 2) {
+        return null;
+    }
+
+    let xs = coords.filter((_, i) => i % 2 == 0);
+    let ys = coords.filter((_, i) => i % 2 == 1);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+// PDF.js の operator list から、実際に stroke/fill された path と画像の外接矩形を取り出す。
+async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Record<string, number>) {
+    let operatorList = await page.getOperatorList();
+    let graphics: PDF_GraphicObject[] = [];
+    let ctm: Matrix = [...IDENTITY_MATRIX];
+    let stack: Array<{ctm: Matrix; lineWidth: number}> = [];
+    let lineWidth = 1;
+    let pendingPath: PDF_GraphicObject | null = null;
+
+    function paintPendingPath() {
+        if (pendingPath) {
+            graphics.push(pendingPath);
+            pendingPath = null;
+        }
+    }
+
+    for (let i = 0; i < operatorList.fnArray.length; i++) {
+        let fn = operatorList.fnArray[i];
+        let args = operatorList.argsArray[i] ?? [];
+
+        if (fn == ops.save) {
+            stack.push({ctm: [...ctm], lineWidth});
+        }
+        else if (fn == ops.restore) {
+            let state = stack.pop();
+            if (state) {
+                ctm = state.ctm;
+                lineWidth = state.lineWidth;
+            }
+        }
+        else if (fn == ops.transform) {
+            ctm = multiplyMatrix(ctm, asMatrix(args));
+        }
+        else if (fn == ops.setLineWidth && typeof args[0] == "number") {
+            lineWidth = args[0];
+        }
+        else if (fn == ops.constructPath) {
+            let box = operatorPathBox(args);
+            let object = box ? transformBox(pageNumber, ctm, box, lineWidth, "path") : null;
+            pendingPath = unionGraphicBox(pendingPath, object);
+        }
+        else if (
+            fn == ops.stroke ||
+            fn == ops.closeStroke ||
+            fn == ops.fill ||
+            fn == ops.eoFill ||
+            fn == ops.fillStroke ||
+            fn == ops.eoFillStroke ||
+            fn == ops.closeFillStroke ||
+            fn == ops.closeEOFillStroke
+        ) {
+            paintPendingPath();
+        }
+        else if (fn == ops.clip || fn == ops.eoClip || fn == ops.endPath) {
+            pendingPath = null;
+        }
+        else if (fn == ops.paintImageXObject || fn == ops.paintJpegXObject || fn == ops.paintInlineImageXObject) {
+            let object = transformBox(pageNumber, ctm, [0, 0, 1, 1], 0, "image");
+            if (object) {
+                graphics.push(object);
+            }
+        }
+        else if (fn == ops.paintFormXObjectBegin) {
+            ctm = multiplyMatrix(ctm, asMatrix(args[0]));
+        }
+    }
+
+    return graphics;
+}
+
+// CLI/viewer からは TextContent と Graphics を別々に扱わず、ページ入力としてまとめて渡す。
+export async function extractPageInputFromPDFPage(page: any, pageNumber: number, ops: Record<string, number>) {
+    let viewport = page.getViewport({scale: 1});
+    let [textContent, graphics] = await Promise.all([
+        page.getTextContent(),
+        extractGraphicsFromPage(page, pageNumber, ops)
+    ]);
+
+    return {
+        items: textContent.items,
+        graphics,
+        width: viewport.width,
+        height: viewport.height
+    };
+}
 
 // PDF.js の transform から文字列、座標、フォントサイズを取り出す。
 function textItemToPart(textItemArg: unknown, page: number) {
@@ -298,6 +477,10 @@ function median(values: number[], fallback: number) {
 
 function pageItems(page: unknown[] | PDF_PageInput) {
     return Array.isArray(page) ? page : page.items;
+}
+
+function pageGraphics(page: unknown[] | PDF_PageInput) {
+    return Array.isArray(page) ? [] : page.graphics ?? [];
 }
 
 function finiteNumber(value: unknown): value is number {
@@ -799,6 +982,48 @@ function clamp(value: number, minValue: number, maxValue: number) {
     return Math.max(minValue, Math.min(value, maxValue));
 }
 
+function rectRight(rect: PDF_Rect) {
+    return rect.x + rect.width;
+}
+
+function rectTop(rect: PDF_Rect) {
+    return rect.y + rect.height;
+}
+
+function rectCenterX(rect: PDF_Rect) {
+    return rect.x + rect.width / 2;
+}
+
+function rectArea(rect: PDF_Rect) {
+    return rect.width * rect.height;
+}
+
+function rectsOverlap(a: PDF_Rect, b: PDF_Rect, margin = 0) {
+    return (
+        a.page == b.page &&
+        rectRight(a) + margin >= b.x &&
+        rectRight(b) + margin >= a.x &&
+        rectTop(a) + margin >= b.y &&
+        rectTop(b) + margin >= a.y
+    );
+}
+
+function unionRects(a: PDF_Rect, b: PDF_Rect): PDF_Rect {
+    let x = Math.min(a.x, b.x);
+    let y = Math.min(a.y, b.y);
+    let right = Math.max(rectRight(a), rectRight(b));
+    let top = Math.max(rectTop(a), rectTop(b));
+    return {page: a.page, x, y, width: right - x, height: top - y};
+}
+
+function expandRect(rect: PDF_Rect, margin: number, metric: PageMetrics): PDF_Rect {
+    let x = clamp(rect.x - margin, 0, metric.width);
+    let y = clamp(rect.y - margin, 0, metric.height);
+    let right = clamp(rectRight(rect) + margin, x, metric.width);
+    let top = clamp(rectTop(rect) + margin, y, metric.height);
+    return {...rect, x, y, width: right - x, height: top - y};
+}
+
 // キャプション行を基準に、Figure は上側、Table は下側を図表領域として切り出す。
 // これは一般的な論文レイアウト向けの経験則で、個別 PDF 固有の文字列には依存しない。
 function estimateFigureRect(caption: string, line: TextLine, columnWidth: number, metric: PageMetrics) {
@@ -1073,6 +1298,169 @@ function fitTableRectToInnerText(
     };
 }
 
+interface GraphicCluster {
+    rect: PDF_Rect;
+    count: number;
+}
+
+function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
+    if (graphic.width <= 0 || graphic.height <= 0) {
+        return false;
+    }
+
+    // ページ全体のクリップ枠や背景に近いものは、図そのものではなく描画補助とみなす。
+    if (graphic.width > metric.width * 0.95 && graphic.height > metric.height * 0.6) {
+        return false;
+    }
+
+    if (graphic.kind == "image" || graphic.kind == "form") {
+        return rectArea(graphic) >= 16;
+    }
+
+    return rectArea(graphic) >= 6 || Math.max(graphic.width, graphic.height) >= 10;
+}
+
+function graphicSearchRect(captionLine: TextLine, rect: PDF_Rect, tableCaption: boolean, columnWidth: number, metric: PageMetrics) {
+    let pageMargin = 36;
+    let wide = rect.width > columnWidth * 1.25 || captionLine.width > columnWidth * 1.25 || rect.width > metric.width * 0.48;
+    let x = wide ? metric.minX - 12 : Math.min(rect.x, captionLine.x - columnWidth * 0.3);
+    let right = wide ? metric.maxX + 12 : Math.max(rectRight(rect), captionLine.x + captionLine.width + columnWidth * 0.3);
+    let verticalLimit = Math.max(280, metric.height * 0.42);
+    let y = tableCaption
+        ? Math.max(pageMargin, captionLine.y - verticalLimit)
+        : captionLine.y + captionLine.fontSize * 0.4;
+    let top = tableCaption
+        ? captionLine.y - captionLine.fontSize * 0.25
+        : Math.min(metric.height - pageMargin, captionLine.y + verticalLimit);
+
+    x = clamp(x, pageMargin, metric.width - pageMargin);
+    right = clamp(right, x + 24, metric.width - pageMargin);
+    y = clamp(y, 0, metric.height);
+    top = clamp(top, y + 24, metric.height);
+    return {page: captionLine.page, x, y, width: right - x, height: top - y};
+}
+
+function clusterGraphicRects(graphics: PDF_GraphicObject[], metric: PageMetrics) {
+    let clusters: GraphicCluster[] = [];
+
+    for (let graphic of graphics) {
+        let rect = expandRect(graphic, Math.max(3, graphic.strokeWidth ?? 1), metric);
+        let merged = false;
+        for (let cluster of clusters) {
+            if (rectsOverlap(cluster.rect, rect, 10)) {
+                cluster.rect = unionRects(cluster.rect, rect);
+                cluster.count++;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) {
+            clusters.push({rect, count: 1});
+        }
+    }
+
+    for (let i = 0; i < clusters.length; i++) {
+        for (let j = i + 1; j < clusters.length; j++) {
+            if (!rectsOverlap(clusters[i].rect, clusters[j].rect, 10)) {
+                continue;
+            }
+            clusters[i].rect = unionRects(clusters[i].rect, clusters[j].rect);
+            clusters[i].count += clusters[j].count;
+            clusters.splice(j, 1);
+            i = -1;
+            break;
+        }
+    }
+
+    return clusters;
+}
+
+function lineRect(line: TextLine): PDF_Rect {
+    return {
+        page: line.page,
+        x: line.x,
+        y: line.y - line.fontSize * 0.25,
+        width: line.width,
+        height: line.fontSize * 1.25
+    };
+}
+
+function fitRectToGraphics(
+    rect: PDF_Rect,
+    captionLine: TextLine,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    tableCaption: boolean
+) {
+    let searchRect = graphicSearchRect(captionLine, rect, tableCaption, columnWidth, metric);
+    let relatedGraphics = graphics.filter((graphic) =>
+        graphic.page == rect.page &&
+        usefulGraphicObject(graphic, metric) &&
+        rectsOverlap(graphic, searchRect)
+    );
+    let clusters = clusterGraphicRects(relatedGraphics, metric)
+        .filter((cluster) => rectsOverlap(cluster.rect, searchRect))
+        .filter((cluster) => rectArea(cluster.rect) >= 120 || cluster.count >= 3);
+
+    let captionCenter = captionLine.x + captionLine.width / 2;
+    let best: GraphicCluster | null = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (let cluster of clusters) {
+        let gap = tableCaption
+            ? captionLine.y - rectTop(cluster.rect)
+            : cluster.rect.y - (captionLine.y + captionLine.fontSize);
+        if (gap < -captionLine.fontSize || gap > Math.max(300, metric.height * 0.45)) {
+            continue;
+        }
+
+        let score =
+            Math.sqrt(rectArea(cluster.rect)) +
+            cluster.count * 8 -
+            Math.max(0, gap) * 0.25 -
+            Math.abs(rectCenterX(cluster.rect) - captionCenter) * 0.04;
+        if (score > bestScore) {
+            best = cluster;
+            bestScore = score;
+        }
+    }
+
+    if (!best) {
+        return rect;
+    }
+
+    // 図中ラベルや表内テキストも、選ばれた描画クラスタの近くにあるものだけ bbox に含める。
+    let fitted = best.rect;
+    let textSearch = expandRect(best.rect, 18, metric);
+    for (let line of lines) {
+        if (
+            line.page != rect.page ||
+            isCaptionLine(line, bodyFontSize, columnWidth) ||
+            isHeadingLine(line, bodyFontSize) ||
+            isParagraphLikeLine(line, bodyFontSize, columnWidth) && line.fontSize >= bodyFontSize - 0.2
+        ) {
+            continue;
+        }
+
+        let candidate = lineRect(line);
+        if (rectsOverlap(candidate, textSearch)) {
+            fitted = unionRects(fitted, candidate);
+        }
+    }
+
+    fitted = expandRect(fitted, 8, metric);
+    if (tableCaption) {
+        let top = Math.min(rectTop(fitted), captionLine.y - captionLine.fontSize * 0.25);
+        return {...fitted, height: Math.max(24, top - fitted.y)};
+    }
+
+    let y = Math.max(fitted.y, captionLine.y + captionLine.fontSize * 0.2);
+    return {...fitted, y, height: Math.max(24, rectTop(fitted) - y)};
+}
+
 // Figure 内の軸ラベルや凡例は本文より小さいフォントで抽出されることが多い。
 // その分布を使って、固定高さの crop が本文やタイトルを巻き込む場合を抑える。
 function fitFigureRectToInnerText(rect: PDF_Rect, lines: TextLine[], bodyFontSize: number, columnWidth: number, metric: PageMetrics) {
@@ -1093,7 +1481,12 @@ function fitFigureRectToInnerText(rect: PDF_Rect, lines: TextLine[], bodyFontSiz
     let pageMargin = 36;
     let minX = Math.min(...innerLines.map((line) => line.x));
     let maxX = Math.max(...innerLines.map((line) => line.x + line.width));
+    let minY = Math.min(...innerLines.map((line) => line.y));
     let maxY = Math.max(...innerLines.map((line) => line.y + line.fontSize));
+    if (maxY - minY < Math.max(bodyFontSize * 3, 30)) {
+        return rect;
+    }
+
     let expandableMinX = rect.x - minX < columnWidth * 0.75 ? minX : rect.x;
     let expandableMaxX = maxX - (rect.x + rect.width) < columnWidth * 0.75 ? maxX : rect.x + rect.width;
     let x = Math.min(rect.x, expandableMinX - 24);
@@ -1251,7 +1644,13 @@ function estimateAlgorithmRect(
 }
 
 // 読み順に並んだ行から、キャプションと図表・疑似コード領域を先に集める。
-function collectFigureCandidates(lines: TextLine[], bodyFontSize: number, columnWidth: number, pageMetrics: Map<number, PageMetrics>) {
+function collectFigureCandidates(
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    columnWidth: number,
+    pageMetrics: Map<number, PageMetrics>
+) {
     let candidates: FigureCandidate[] = [];
 
     for (let i = 0; i < lines.length; i++) {
@@ -1302,10 +1701,17 @@ function collectFigureCandidates(lines: TextLine[], bodyFontSize: number, column
         if (rect && isTableCaption(caption)) {
             rect = fitTableRectToInnerText(rect, lines, line, endIndex, bodyFontSize, columnWidth, metric) ??
                 trimTableRectAtBodyText(rect, lines, endIndex, bodyFontSize, columnWidth);
+            rect = fitRectToGraphics(rect, line, lines, graphics, bodyFontSize, columnWidth, metric, true);
         }
         else if (rect) {
+            let fallbackRect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = fitFigureRectToInnerText(rect, lines, bodyFontSize, columnWidth, metric);
+            rect = fitRectToGraphics(rect, line, lines, graphics, bodyFontSize, columnWidth, metric, false);
+            rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
+            if (rect.height < 36 && fallbackRect.height > rect.height) {
+                rect = fallbackRect;
+            }
         }
 
         candidates.push({
@@ -1346,6 +1752,7 @@ function lineCenterHorizontallyInsideRect(line: TextLine, rect: PDF_Rect, margin
 export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
     // TextItem をページごとの行へ復元し、文書全体の本文らしいサイズを推定する。
     let lines = pages.flatMap((page, index) => buildLinesForPage(pageItems(page), index + 1));
+    let graphics = pages.flatMap((page) => pageGraphics(page));
     let bodyFontSize = estimateBodyFontSize(lines);
 
     // 本文幅の代表値を使って、カラム移動や短い行による段落切れを判定する。
@@ -1366,7 +1773,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
 
     // 読み順にした行から Figure/Table を先に集め、後続の本文抽出で除外できる形にする。
     let readingLines = sortLinesForReading(lines);
-    let figures = collectFigureCandidates(readingLines, bodyFontSize, columnWidth, pageMetrics);
+    let figures = collectFigureCandidates(readingLines, graphics, bodyFontSize, columnWidth, pageMetrics);
     let figureByStart = new Map(figures.map((figure) => [figure.startIndex, figure]));
     let captionLineIndices = new Set<number>();
     let figureRects = figures

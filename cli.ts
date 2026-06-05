@@ -1,7 +1,15 @@
 "use strict";
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import {PDF_Node, PDF_NodeType, PDF_PageInput, PDF_Rect, extractNodesFromPages, nodesToHTML} from "./extractor";
+import {
+    PDF_Node,
+    PDF_NodeType,
+    PDF_PageInput,
+    PDF_Rect,
+    extractNodesFromPages,
+    extractPageInputFromPDFPage,
+    nodesToHTML
+} from "./extractor";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs";
 
@@ -148,13 +156,7 @@ async function extractPDFFile(fileName: string, renderImages: boolean) {
 
     for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
         let page = await pdf.getPage(pageNumber);
-        let viewport = page.getViewport({scale: 1});
-        let textContent = await page.getTextContent();
-        pages.push({
-            items: textContent.items,
-            width: viewport.width,
-            height: viewport.height
-        });
+        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>));
         pageProxies.push(page);
     }
 
