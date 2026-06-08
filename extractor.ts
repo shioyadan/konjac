@@ -1000,10 +1000,6 @@ function rectTop(rect: PDF_Rect) {
     return rect.y + rect.height;
 }
 
-function rectCenterX(rect: PDF_Rect) {
-    return rect.x + rect.width / 2;
-}
-
 function rectCenterY(rect: PDF_Rect) {
     return rect.y + rect.height / 2;
 }
@@ -1027,6 +1023,23 @@ function unionRects(a: PDF_Rect, b: PDF_Rect): PDF_Rect {
     let y = Math.min(a.y, b.y);
     let right = Math.max(rectRight(a), rectRight(b));
     let top = Math.max(rectTop(a), rectTop(b));
+    return {page: a.page, x, y, width: right - x, height: top - y};
+}
+
+// 探索窓から外へはみ出した anchor を、crop 可能な範囲へ戻す。
+function intersectRects(a: PDF_Rect, b: PDF_Rect) {
+    if (a.page != b.page) {
+        return null;
+    }
+
+    let x = Math.max(a.x, b.x);
+    let y = Math.max(a.y, b.y);
+    let right = Math.min(rectRight(a), rectRight(b));
+    let top = Math.min(rectTop(a), rectTop(b));
+    if (right - x < 24 || top - y < 24) {
+        return null;
+    }
+
     return {page: a.page, x, y, width: right - x, height: top - y};
 }
 
@@ -1282,10 +1295,6 @@ function fitTableRectToInnerText(
             break;
         }
 
-        if (tableLines.length > 0 && isParagraphLikeLine(line, bodyFontSize, columnWidth)) {
-            break;
-        }
-
         tableLines.push(line);
         lastY = line.y;
     }
@@ -1316,9 +1325,26 @@ function fitTableRectToInnerText(
     };
 }
 
-interface GraphicCluster {
-    rect: PDF_Rect;
-    count: number;
+// Table の縦範囲は文字行で決め、横幅だけ同じ高さにある罫線・枠で広げる。
+// prose を含む用語表を本文と誤認しないよう、Table には Figure 用の本文回避補正をかけない。
+function expandTableRectToRules(rect: PDF_Rect, graphics: PDF_GraphicObject[], metric: PageMetrics) {
+    let band = expandRect(rect, 8, metric);
+    let ruleBox = unionAllRects(
+        graphics
+            .filter((graphic) =>
+                graphic.page == rect.page &&
+                usefulGraphicObject(graphic, metric) &&
+                rectsOverlap(graphic, band)
+            )
+            .map((graphic) => expandRect(graphic, Math.max(2, graphic.strokeWidth ?? 1), metric))
+    );
+    if (!ruleBox) {
+        return rect;
+    }
+
+    let x = clamp(Math.min(rect.x, ruleBox.x), 0, metric.width);
+    let right = clamp(Math.max(rectRight(rect), rectRight(ruleBox)), x + 24, metric.width);
+    return {...rect, x, width: right - x};
 }
 
 function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
@@ -1357,41 +1383,6 @@ function graphicSearchRect(captionLine: TextLine, rect: PDF_Rect, tableCaption: 
     y = clamp(y, 0, metric.height);
     top = clamp(top, y + 24, metric.height);
     return {page: captionLine.page, x, y, width: right - x, height: top - y};
-}
-
-function clusterGraphicRects(graphics: PDF_GraphicObject[], metric: PageMetrics) {
-    let clusters: GraphicCluster[] = [];
-
-    for (let graphic of graphics) {
-        let rect = expandRect(graphic, Math.max(3, graphic.strokeWidth ?? 1), metric);
-        let merged = false;
-        for (let cluster of clusters) {
-            if (rectsOverlap(cluster.rect, rect, 10)) {
-                cluster.rect = unionRects(cluster.rect, rect);
-                cluster.count++;
-                merged = true;
-                break;
-            }
-        }
-        if (!merged) {
-            clusters.push({rect, count: 1});
-        }
-    }
-
-    for (let i = 0; i < clusters.length; i++) {
-        for (let j = i + 1; j < clusters.length; j++) {
-            if (!rectsOverlap(clusters[i].rect, clusters[j].rect, 10)) {
-                continue;
-            }
-            clusters[i].rect = unionRects(clusters[i].rect, clusters[j].rect);
-            clusters[i].count += clusters[j].count;
-            clusters.splice(j, 1);
-            i = -1;
-            break;
-        }
-    }
-
-    return clusters;
 }
 
 function lineRect(line: TextLine): PDF_Rect {
@@ -1452,14 +1443,6 @@ function isTopEdgeTextBlocker(line: TextLine, rect: PDF_Rect, bodyFontSize: numb
     );
 }
 
-function isTableProseLikeChunk(line: TextLine, bodyFontSize: number, columnWidth: number) {
-    return line.fontSize >= bodyFontSize - 0.4 &&
-        line.width > columnWidth * 0.35 &&
-        line.text.length > 20 &&
-        /[a-z]{3,}/i.test(line.text) &&
-        /\s/.test(line.text);
-}
-
 function isBodySizedProseFragment(line: TextLine, bodyFontSize: number) {
     return line.fontSize >= Math.max(7, bodyFontSize - 0.8) &&
         line.text.length > 12 &&
@@ -1467,27 +1450,17 @@ function isBodySizedProseFragment(line: TextLine, bodyFontSize: number) {
         /\s/.test(line.text);
 }
 
-function isTableEdgeTextBlocker(line: TextLine, rect: PDF_Rect, bodyFontSize: number, columnWidth: number, tableCaption: boolean) {
-    if (!tableCaption) {
-        return false;
+function isCropSearchBlockerLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    if (
+        isCaptionLine(line, bodyFontSize, columnWidth) ||
+        isAlgorithmCaptionLine(line) ||
+        isHeadingLine(line, bodyFontSize) ||
+        isTitleLine(line, bodyFontSize)
+    ) {
+        return true;
     }
 
-    let box = lineRect(line);
-    let edgeBand = Math.max(12, line.fontSize * 1.6);
-    let crossesOuterSide =
-        (anchorCrossesVerticalEdge(box, rect.x, rect) && rectRight(box) <= rect.x + edgeBand) ||
-        (anchorCrossesVerticalEdge(box, rectRight(rect), rect) && box.x >= rectRight(rect) - edgeBand);
-    let paragraphLike = isParagraphLikeLine(line, bodyFontSize, columnWidth);
-
-    // 表の内部は本文サイズの文字を含むため、全面的にはブロックしない。表の下に続く本文や
-    // 隣カラムの本文が bbox の端にかかっている場合だけ、表の外側として切り落とす。
-    return (
-        rectsOverlap(rect, box) &&
-        (
-            (paragraphLike && box.y - rect.y <= edgeBand) ||
-            (crossesOuterSide && (paragraphLike || isTableProseLikeChunk(line, bodyFontSize, columnWidth)))
-        )
-    );
+    return isHardCropBlockerLine(line, bodyFontSize, columnWidth, false);
 }
 
 function hardCropBlockers(
@@ -1502,8 +1475,7 @@ function hardCropBlockers(
             line.page == rect.page &&
             (
                 isHardCropBlockerLine(line, bodyFontSize, columnWidth, tableCaption) ||
-                isTopEdgeTextBlocker(line, rect, bodyFontSize, columnWidth, tableCaption) ||
-                isTableEdgeTextBlocker(line, rect, bodyFontSize, columnWidth, tableCaption)
+                isTopEdgeTextBlocker(line, rect, bodyFontSize, columnWidth, tableCaption)
             )
         )
         .map(lineRect)
@@ -1693,126 +1665,118 @@ function expandRectToAvoidSoftCuts(
     return current;
 }
 
-function trimTableBottomProseChunks(rect: PDF_Rect, lines: TextLine[], bodyFontSize: number, columnWidth: number, metric: PageMetrics) {
-    let edgeBand = Math.max(12, bodyFontSize * 1.6);
-    let blocker = lines
-        .filter((line) =>
-            line.page == rect.page &&
-            isTableProseLikeChunk(line, bodyFontSize, columnWidth)
-        )
-        .map(lineRect)
-        .filter((box) => rectsOverlap(rect, box) && box.y - rect.y <= edgeBand)
-        .sort((a, b) => a.y - b.y)[0];
-    if (!blocker) {
-        return rect;
-    }
-
-    let y = rectTop(blocker) + 4;
-    let candidate = {...rect, y, height: rectTop(rect) - y};
-    return validCropRect(candidate, metric) ? candidate : rect;
-}
-
 function avoidBodyAndEdgeCuts(
     rect: PDF_Rect,
     lines: TextLine[],
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
-    metric: PageMetrics,
-    tableCaption: boolean
+    metric: PageMetrics
 ) {
-    let trimmed = trimHardCropBlockers(rect, lines, bodyFontSize, columnWidth, metric, tableCaption);
-    let expanded = expandRectToAvoidSoftCuts(trimmed, lines, graphics, bodyFontSize, columnWidth, metric, tableCaption);
-    return tableCaption
-        ? trimTableBottomProseChunks(expanded, lines, bodyFontSize, columnWidth, metric)
-        : expanded;
+    let trimmed = trimHardCropBlockers(rect, lines, bodyFontSize, columnWidth, metric, false);
+    return expandRectToAvoidSoftCuts(trimmed, lines, graphics, bodyFontSize, columnWidth, metric, false);
 }
 
-function fitRectToGraphics(
+function firstCropSearchBlocker(
+    searchRect: PDF_Rect,
+    lines: TextLine[],
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    let blockers = lines
+        .filter((line) =>
+            line.page == searchRect.page &&
+            isCropSearchBlockerLine(line, bodyFontSize, columnWidth)
+        )
+        .map(lineRect)
+        .filter((box) => rectsOverlap(searchRect, box));
+
+    return blockers.sort((a, b) => a.y - b.y)[0];
+}
+
+function trimSearchRectAtBlocker(
+    searchRect: PDF_Rect,
+    lines: TextLine[],
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    let blocker = firstCropSearchBlocker(searchRect, lines, bodyFontSize, columnWidth);
+    if (!blocker) {
+        return searchRect;
+    }
+
+    // キャプションから探索して最初に当たる禁止行を境界にする。
+    // 二分探索で安全な境界を詰める代わりに、既に得ている bbox を使って同じ役割を果たす。
+    let top = clamp(blocker.y - 4, searchRect.y + 24, rectTop(searchRect));
+    return {...searchRect, height: top - searchRect.y};
+}
+
+function graphicAnchorsInRect(rect: PDF_Rect, graphics: PDF_GraphicObject[], metric: PageMetrics) {
+    return graphics
+        .filter((graphic) =>
+            graphic.page == rect.page &&
+            usefulGraphicObject(graphic, metric) &&
+            rectsOverlap(graphic, rect)
+        )
+        .map((graphic) => intersectRects(expandRect(graphic, Math.max(3, graphic.strokeWidth ?? 1), metric), rect))
+        .filter((graphic): graphic is PDF_Rect => graphic != null);
+}
+
+function textAnchorsInRect(
+    rect: PDF_Rect,
+    lines: TextLine[],
+    bodyFontSize: number,
+    columnWidth: number,
+    nearRect?: PDF_Rect
+) {
+    return lines
+        .filter((line) =>
+            line.page == rect.page &&
+            !isCaptionLine(line, bodyFontSize, columnWidth) &&
+            !isAlgorithmCaptionLine(line) &&
+            !isHeadingLine(line, bodyFontSize) &&
+            !isTitleLine(line, bodyFontSize) &&
+            !isCropSearchBlockerLine(line, bodyFontSize, columnWidth) &&
+            isSoftCropAnchorLine(line, bodyFontSize, columnWidth, false)
+        )
+        .map(lineRect)
+        .filter((box) =>
+            rectsOverlap(box, rect) &&
+            (!nearRect || rectsOverlap(box, nearRect))
+        );
+}
+
+function unionAllRects(rects: PDF_Rect[]) {
+    return rects.reduce((box, rect) => box ? unionRects(box, rect) : rect, null as PDF_Rect | null);
+}
+
+// Figure はキャプション側から探索し、本文・見出し・別キャプションを禁止境界として切る。
+// 描画オブジェクトをクラスタリングせず、探索窓内の描画 bbox とその近くの小さな図中文字だけを使う。
+function fitRectByCaptionSearch(
     rect: PDF_Rect,
     captionLine: TextLine,
     lines: TextLine[],
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
-    metric: PageMetrics,
-    tableCaption: boolean
+    metric: PageMetrics
 ) {
-    let searchRect = graphicSearchRect(captionLine, rect, tableCaption, columnWidth, metric);
-    let allowedRect = expandRect(rect, 12, metric);
-    let allowWideCluster = isWideFigureWidth(rect.width, columnWidth, metric) ||
-        isWideFigureWidth(captionLine.width, columnWidth, metric);
-    let relatedGraphics = graphics.filter((graphic) =>
-        graphic.page == rect.page &&
-        usefulGraphicObject(graphic, metric) &&
-        rectsOverlap(graphic, searchRect) &&
-        rectsOverlap(graphic, allowedRect)
-    );
-    let clusters = clusterGraphicRects(relatedGraphics, metric)
-        .filter((cluster) => rectsOverlap(cluster.rect, searchRect))
-        .filter((cluster) => rectsOverlap(cluster.rect, allowedRect))
-        // 通常の 1 カラム図では、右カラム本文の glyph path などと結合した横長クラスタを採用しない。
-        .filter((cluster) => allowWideCluster || cluster.rect.width <= allowedRect.width * 1.25)
-        .filter((cluster) => rectArea(cluster.rect) >= 120 || cluster.count >= 3);
+    let rawSearchRect = graphicSearchRect(captionLine, rect, false, columnWidth, metric);
+    let searchRect = trimSearchRectAtBlocker(rawSearchRect, lines, bodyFontSize, columnWidth);
+    let rawGraphicAnchors = graphicAnchorsInRect(searchRect, graphics, metric);
+    let graphicBox = unionAllRects(rawGraphicAnchors);
+    let textSearchRect = graphicBox ? expandRect(graphicBox, 18, metric) : searchRect;
+    let textAnchors = textAnchorsInRect(searchRect, lines, bodyFontSize, columnWidth, textSearchRect);
+    let anchors = [...rawGraphicAnchors, ...textAnchors];
+    let fitted = unionAllRects(anchors);
 
-    let captionCenter = captionLine.x + captionLine.width / 2;
-    let best: GraphicCluster | null = null;
-    let bestScore = Number.NEGATIVE_INFINITY;
-
-    for (let cluster of clusters) {
-        let gap = tableCaption
-            ? captionLine.y - rectTop(cluster.rect)
-            : cluster.rect.y - (captionLine.y + captionLine.fontSize);
-        if (gap < -captionLine.fontSize || gap > Math.max(300, metric.height * 0.45)) {
-            continue;
-        }
-
-        let score =
-            Math.sqrt(rectArea(cluster.rect)) +
-            cluster.count * 8 -
-            Math.max(0, gap) * 0.25 -
-            Math.abs(rectCenterX(cluster.rect) - captionCenter) * 0.04;
-        if (score > bestScore) {
-            best = cluster;
-            bestScore = score;
-        }
-    }
-
-    if (!best) {
-        return avoidBodyAndEdgeCuts(rect, lines, graphics, bodyFontSize, columnWidth, metric, tableCaption);
-    }
-
-    // 図中ラベルや表内テキストも、選ばれた描画クラスタの近くにあるものだけ bbox に含める。
-    let fitted = best.rect;
-    let textSearch = expandRect(best.rect, 18, metric);
-    for (let line of lines) {
-        if (
-            line.page != rect.page ||
-            isCaptionLine(line, bodyFontSize, columnWidth) ||
-            isHeadingLine(line, bodyFontSize) ||
-            isParagraphLikeLine(line, bodyFontSize, columnWidth) && line.fontSize >= bodyFontSize - 0.2 ||
-            !tableCaption && isBodySizedProseFragment(line, bodyFontSize)
-        ) {
-            continue;
-        }
-
-        let candidate = lineRect(line);
-        if (rectsOverlap(candidate, textSearch)) {
-            fitted = unionRects(fitted, candidate);
-        }
+    if (!fitted || rectArea(fitted) < 120) {
+        return avoidBodyAndEdgeCuts(rect, lines, graphics, bodyFontSize, columnWidth, metric);
     }
 
     fitted = expandRect(fitted, 8, metric);
-    if (tableCaption) {
-        fitted = unionRects(fitted, rect);
-        let top = Math.min(rectTop(fitted), captionLine.y - captionLine.fontSize * 0.25);
-        let finalRect = {...fitted, height: Math.max(24, top - fitted.y)};
-        return avoidBodyAndEdgeCuts(finalRect, lines, graphics, bodyFontSize, columnWidth, metric, tableCaption);
-    }
-
-    let y = Math.max(fitted.y, figureCaptionClearY(captionLine));
-    let finalRect = {...fitted, y, height: Math.max(24, rectTop(fitted) - y)};
-    return avoidBodyAndEdgeCuts(finalRect, lines, graphics, bodyFontSize, columnWidth, metric, tableCaption);
+    let finalRect = intersectRects(fitted, searchRect) ?? rect;
+    return avoidBodyAndEdgeCuts(finalRect, lines, graphics, bodyFontSize, columnWidth, metric);
 }
 
 // Figure 内の軸ラベルや凡例は本文より小さいフォントで抽出されることが多い。
@@ -2064,18 +2028,15 @@ function collectFigureCandidates(
 
         let rect = estimateFigureRect(caption, line, columnWidth, metric);
         if (rect && isTableCaption(caption)) {
-            let captionEndLine = lines[endIndex] ?? line;
-            // Table はキャプションの下側を切り出すため、複数行キャプションでは最終行を境界にする。
-            let tableBoundaryLine = {...line, y: captionEndLine.y, fontSize: captionEndLine.fontSize};
             rect = fitTableRectToInnerText(rect, lines, line, endIndex, bodyFontSize, columnWidth, metric) ??
                 trimTableRectAtBodyText(rect, lines, endIndex, bodyFontSize, columnWidth);
-            rect = fitRectToGraphics(rect, tableBoundaryLine, lines, graphics, bodyFontSize, columnWidth, metric, true);
+            rect = expandTableRectToRules(rect, graphics, metric);
         }
         else if (rect) {
             let fallbackRect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = fitFigureRectToInnerText(rect, lines, bodyFontSize, columnWidth, metric);
-            rect = fitRectToGraphics(rect, line, lines, graphics, bodyFontSize, columnWidth, metric, false);
+            rect = fitRectByCaptionSearch(rect, line, lines, graphics, bodyFontSize, columnWidth, metric);
             rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             if ((rect.height < 36 || rect.width < 80) && rectArea(fallbackRect) > rectArea(rect)) {
                 rect = fallbackRect;
