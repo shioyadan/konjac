@@ -140,6 +140,23 @@ interface PageMetrics {
     maxX: number;
 }
 
+// 本文行の左端と baseline 間隔をページ・カラムごとにまとめたもの。
+interface BodyColumnModel {
+    // 1 始まりのページ番号。
+    page: number;
+    // 本文行が揃う左端 x 座標。
+    x: number;
+    // 同じカラム内の代表的な baseline 間隔。
+    yStep: number;
+    // 推定に使った baseline 群。
+    baselines: number[];
+}
+
+interface BodyLayoutModel {
+    // ページ内の本文カラム候補。
+    columns: BodyColumnModel[];
+}
+
 // キャプションから推定した図表ノードと、そのキャプション行の範囲。
 interface FigureCandidate {
     // 読み順配列でのキャプション先頭行。
@@ -542,8 +559,8 @@ function isPageDecoration(line: TextLine) {
     return /^\d+$/.test(line.text) && line.fontSize <= 12;
 }
 
-const CAPTION_NUMBER_PATTERN = "(?:\\d+|[IVXLCDM]+)";
-const CAPTION_LINE_PATTERN = new RegExp(`^(?:Figure|Fig\\.|Table)\\s+${CAPTION_NUMBER_PATTERN}(?:\\s*[:.]|$)`, "i");
+const CAPTION_NUMBER_PATTERN = "(?:\\d+(?:\\.\\d+)*|[IVXLCDM]+)";
+const CAPTION_LINE_PATTERN = new RegExp(`^(?:Figure|Fig\\.|Table)\\s+${CAPTION_NUMBER_PATTERN}(?!\\.\\d)(?:\\s*[:.]|$)`, "i");
 const TABLE_CAPTION_PATTERN = new RegExp(`^Table\\s+${CAPTION_NUMBER_PATTERN}\\b`, "i");
 const ALGORITHM_CAPTION_PATTERN = /^Algorithm\s+\d+\b/i;
 
@@ -553,10 +570,12 @@ function isCaptionLine(line: TextLine, bodyFontSize?: number, columnWidth?: numb
         return false;
     }
 
-    // "Fig. 12. The ..." のように本文行頭に図番号参照が来る場合を、実キャプションと区別する。
+    // "Fig. 12. The ..." のような略記参照だけは本文行頭に出ることがある。
+    // "Figure 12. ..." や "Table 1. ..." は長いキャプションでも拾う。
     if (
         bodyFontSize != null &&
         columnWidth != null &&
+        /^Fig\./i.test(line.text) &&
         isParagraphLikeLine(line, bodyFontSize, columnWidth)
     ) {
         return false;
@@ -1070,8 +1089,9 @@ function estimateFigureRect(caption: string, line: TextLine, columnWidth: number
 
     // 短いキャプションは中央寄せされることがあるため、キャプション左端だけを図の左端とはみなさない。
     // ただし隣のカラム本文を巻き込まないよう、カラム左端へ寄せる量には上限を置く。
-    let rightColumnLeft = Math.max(metric.width / 2, metric.maxX - columnWidth);
-    let columnLeft = line.x >= metric.width / 2 ? rightColumnLeft : metric.minX;
+    let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
+    let rightColumnLeft = Math.max(columnSplit, metric.maxX - columnWidth);
+    let columnLeft = line.x >= columnSplit ? rightColumnLeft : metric.minX;
     let captionX = Math.max(pageMargin, line.x - 4);
     let columnX = Math.max(pageMargin, columnLeft - 4);
     let maxColumnSnap = Math.min(columnWidth * 0.25, 48);
@@ -1134,6 +1154,65 @@ function isParagraphLikeLine(line: TextLine, bodyFontSize: number, columnWidth: 
         line.width > columnWidth * 0.85 &&
         line.text.length > 55
     );
+}
+
+function bodyLayoutSeedLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    return Math.abs(line.fontSize - bodyFontSize) < 0.8 &&
+        line.width > columnWidth * 0.55 &&
+        line.text.length > 30 &&
+        !isCaptionLine(line, bodyFontSize, columnWidth) &&
+        !isHeadingLine(line, bodyFontSize) &&
+        !isTitleLine(line, bodyFontSize);
+}
+
+// 本文は同じカラム内で左端と baseline 間隔が安定しているため、その規則性をページごとに推定する。
+function estimateBodyLayout(lines: TextLine[], bodyFontSize: number, columnWidth: number): BodyLayoutModel {
+    let columns: BodyColumnModel[] = [];
+    let pages = new Set(lines.map((line) => line.page));
+
+    for (let page of pages) {
+        let buckets: Array<{xs: number[]; ys: number[]}> = [];
+        let seeds = lines
+            .filter((line) => line.page == page && bodyLayoutSeedLine(line, bodyFontSize, columnWidth))
+            .sort((a, b) => a.x - b.x);
+
+        for (let line of seeds) {
+            let bucket = buckets.find((candidate) =>
+                Math.abs(line.x - median(candidate.xs, line.x)) <= 18
+            );
+            if (!bucket) {
+                buckets.push({xs: [line.x], ys: [line.y]});
+                continue;
+            }
+
+            bucket.xs.push(line.x);
+            bucket.ys.push(line.y);
+        }
+
+        for (let bucket of buckets) {
+            if (bucket.ys.length < 3) {
+                continue;
+            }
+
+            let ys = [...bucket.ys].sort((a, b) => b - a);
+            let diffs: number[] = [];
+            for (let i = 0; i + 1 < ys.length; i++) {
+                let diff = ys[i] - ys[i + 1];
+                if (diff >= bodyFontSize * 0.7 && diff <= bodyFontSize * 2.4) {
+                    diffs.push(diff);
+                }
+            }
+
+            columns.push({
+                page,
+                x: median(bucket.xs, bucket.xs[0]),
+                yStep: median(diffs, bodyFontSize * 1.25),
+                baselines: ys
+            });
+        }
+    }
+
+    return {columns};
 }
 
 function looksLikeBodyLine(line: TextLine, bodyFontSize: number) {
@@ -1259,11 +1338,13 @@ function trimTableRectAtBodyText(rect: PDF_Rect, lines: TextLine[], captionEndIn
 function fitTableRectToInnerText(
     rect: PDF_Rect,
     lines: TextLine[],
+    graphics: PDF_GraphicObject[],
     captionLine: TextLine,
     captionEndIndex: number,
     bodyFontSize: number,
     columnWidth: number,
-    metric: PageMetrics
+    metric: PageMetrics,
+    bodyLayout: BodyLayoutModel
 ) {
     let tableLines: TextLine[] = [];
     let lastY = captionLine.y;
@@ -1287,12 +1368,31 @@ function fitTableRectToInnerText(
         }
 
         let gap = lastY - line.y;
-        if (tableLines.length > 0 && gap > gapLimit) {
+        let prevTableLine = tableLines[tableLines.length - 1];
+        if (
+            prevTableLine &&
+            (gap > gapLimit || isWideFloatLineGap(prevTableLine, line, bodyLayout, bodyFontSize, columnWidth))
+        ) {
             break;
         }
 
         if (isCaptionLine(line, bodyFontSize, columnWidth) || isHeadingLine(line, bodyFontSize)) {
             break;
+        }
+
+        let anchor = isFloatTextAnchorLine(line, lines, graphics, rect, bodyFontSize, columnWidth, metric, true, bodyLayout);
+        let bodyLine =
+            isParagraphLikeLine(line, bodyFontSize, columnWidth) ||
+            isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth);
+        if (bodyLine && !anchor) {
+            if (tableLines.length > 0) {
+                break;
+            }
+            continue;
+        }
+
+        if (!anchor && tableLines.length == 0) {
+            continue;
         }
 
         tableLines.push(line);
@@ -1380,6 +1480,13 @@ function graphicSearchRect(captionLine: TextLine, rect: PDF_Rect, tableCaption: 
 
     x = clamp(x, pageMargin, metric.width - pageMargin);
     right = clamp(right, x + 24, metric.width - pageMargin);
+    let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
+    if (!wide && captionLine.x < columnSplit) {
+        right = clamp(Math.min(right, columnSplit + 8), x + 24, metric.width - pageMargin);
+    }
+    else if (!wide) {
+        x = clamp(Math.max(x, columnSplit - 24), pageMargin, right - 24);
+    }
     y = clamp(y, 0, metric.height);
     top = clamp(top, y + 24, metric.height);
     return {page: captionLine.page, x, y, width: right - x, height: top - y};
@@ -1395,7 +1502,13 @@ function lineRect(line: TextLine): PDF_Rect {
     };
 }
 
-function isHardCropBlockerLine(line: TextLine, bodyFontSize: number, columnWidth: number, tableCaption: boolean) {
+function isHardCropBlockerLine(
+    line: TextLine,
+    bodyFontSize: number,
+    columnWidth: number,
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
+) {
     if (isCaptionLine(line, bodyFontSize, columnWidth) || isHeadingLine(line, bodyFontSize)) {
         return true;
     }
@@ -1409,7 +1522,11 @@ function isHardCropBlockerLine(line: TextLine, bodyFontSize: number, columnWidth
         return true;
     }
 
-    if (isBodySizedProseFragment(line, bodyFontSize)) {
+    if (isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth)) {
+        return true;
+    }
+
+    if (!bodyLayout && isBodySizedProseFragment(line, bodyFontSize)) {
         return true;
     }
 
@@ -1450,7 +1567,124 @@ function isBodySizedProseFragment(line: TextLine, bodyFontSize: number) {
         /\s/.test(line.text);
 }
 
-function isCropSearchBlockerLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+function matchesBodyColumnX(line: TextLine, column: BodyColumnModel, columnWidth: number) {
+    let delta = line.x - column.x;
+    return Math.abs(delta) <= 8 ||
+        delta > 0 && delta <= 24 && line.width > columnWidth * 0.35;
+}
+
+function matchesBodyBaseline(line: TextLine, column: BodyColumnModel) {
+    let tolerance = Math.max(2.5, column.yStep * 0.22);
+    return column.baselines.some((baseline) => {
+        let diff = Math.abs(line.y - baseline);
+        return diff <= tolerance ||
+            Math.abs(diff - column.yStep) <= tolerance ||
+            Math.abs(diff - column.yStep * 2) <= tolerance;
+    });
+}
+
+function isBodyLayoutLine(
+    line: TextLine,
+    bodyLayout: BodyLayoutModel | undefined,
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    if (!bodyLayout || line.fontSize < bodyFontSize - 1.2 || line.fontSize > bodyFontSize + 1.2) {
+        return false;
+    }
+
+    if (!isBodySizedProseFragment(line, bodyFontSize) && line.text.length < 18) {
+        return false;
+    }
+
+    return bodyLayout.columns.some((column) =>
+        column.page == line.page &&
+        matchesBodyColumnX(line, column, columnWidth) &&
+        matchesBodyBaseline(line, column)
+    );
+}
+
+function bodyColumnForLine(line: TextLine, bodyLayout: BodyLayoutModel | undefined, columnWidth: number) {
+    if (!bodyLayout) {
+        return undefined;
+    }
+
+    return bodyLayout.columns
+        .filter((column) => column.page == line.page && Math.abs(line.x - column.x) < columnWidth * 0.8)
+        .sort((a, b) => Math.abs(line.x - a.x) - Math.abs(line.x - b.x))[0];
+}
+
+function bodyLineStep(line: TextLine, bodyLayout: BodyLayoutModel | undefined, bodyFontSize: number, columnWidth: number) {
+    return bodyColumnForLine(line, bodyLayout, columnWidth)?.yStep ?? bodyFontSize * 1.25;
+}
+
+function isWideFloatLineGap(prevLine: TextLine, nextLine: TextLine, bodyLayout: BodyLayoutModel | undefined, bodyFontSize: number, columnWidth: number) {
+    let gap = prevLine.y - nextLine.y;
+    let step = Math.max(
+        bodyLineStep(prevLine, bodyLayout, bodyFontSize, columnWidth),
+        bodyLineStep(nextLine, bodyLayout, bodyFontSize, columnWidth)
+    );
+
+    return gap > Math.max(step * 1.45, bodyFontSize * 1.55);
+}
+
+function hasSameRowPeer(line: TextLine, lines: TextLine[], rect: PDF_Rect) {
+    let yTolerance = Math.max(2.5, line.fontSize * 0.35);
+    return lines.some((other) =>
+        other != line &&
+        other.page == line.page &&
+        Math.abs(other.y - line.y) <= yTolerance &&
+        rectsOverlap(lineRect(other), rect)
+    );
+}
+
+function lineNearGraphics(line: TextLine, graphics: PDF_GraphicObject[], metric: PageMetrics) {
+    let box = expandRect(lineRect(line), 6, metric);
+    return graphics.some((graphic) =>
+        graphic.page == line.page &&
+        usefulGraphicObject(graphic, metric) &&
+        rectsOverlap(box, expandRect(graphic, Math.max(4, graphic.strokeWidth ?? 1), metric))
+    );
+}
+
+function isFloatTextAnchorLine(
+    line: TextLine,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    searchRect: PDF_Rect,
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
+) {
+    if (
+        isCaptionLine(line, bodyFontSize, columnWidth) ||
+        isAlgorithmCaptionLine(line) ||
+        isHeadingLine(line, bodyFontSize) ||
+        isTitleLine(line, bodyFontSize)
+    ) {
+        return false;
+    }
+
+    let structured = hasSameRowPeer(line, lines, searchRect) || lineNearGraphics(line, graphics, metric);
+    let bodyLine =
+        isParagraphLikeLine(line, bodyFontSize, columnWidth) ||
+        isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth);
+    if (bodyLine && !(tableCaption && structured)) {
+        return false;
+    }
+
+    let compactLimit = columnWidth * (tableCaption ? 0.9 : 0.7);
+    return structured || line.fontSize < bodyFontSize - 0.8 || line.width < compactLimit;
+}
+
+function isCropSearchBlockerLine(
+    line: TextLine,
+    bodyFontSize: number,
+    columnWidth: number,
+    bodyLayout?: BodyLayoutModel
+) {
     if (
         isCaptionLine(line, bodyFontSize, columnWidth) ||
         isAlgorithmCaptionLine(line) ||
@@ -1460,7 +1694,7 @@ function isCropSearchBlockerLine(line: TextLine, bodyFontSize: number, columnWid
         return true;
     }
 
-    return isHardCropBlockerLine(line, bodyFontSize, columnWidth, false);
+    return isHardCropBlockerLine(line, bodyFontSize, columnWidth, false, bodyLayout);
 }
 
 function hardCropBlockers(
@@ -1468,13 +1702,14 @@ function hardCropBlockers(
     lines: TextLine[],
     bodyFontSize: number,
     columnWidth: number,
-    tableCaption: boolean
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
 ) {
     return lines
         .filter((line) =>
             line.page == rect.page &&
             (
-                isHardCropBlockerLine(line, bodyFontSize, columnWidth, tableCaption) ||
+                isHardCropBlockerLine(line, bodyFontSize, columnWidth, tableCaption, bodyLayout) ||
                 isTopEdgeTextBlocker(line, rect, bodyFontSize, columnWidth, tableCaption)
             )
         )
@@ -1558,11 +1793,12 @@ function trimHardCropBlockers(
     bodyFontSize: number,
     columnWidth: number,
     metric: PageMetrics,
-    tableCaption: boolean
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
 ) {
     let current = rect;
     for (let pass = 0; pass < 6; pass++) {
-        let blockers = hardCropBlockers(current, lines, bodyFontSize, columnWidth, tableCaption);
+        let blockers = hardCropBlockers(current, lines, bodyFontSize, columnWidth, tableCaption, bodyLayout);
         if (blockers.length == 0) {
             break;
         }
@@ -1577,9 +1813,15 @@ function trimHardCropBlockers(
     return current;
 }
 
-function isSoftCropAnchorLine(line: TextLine, bodyFontSize: number, columnWidth: number, tableCaption: boolean) {
+function isSoftCropAnchorLine(
+    line: TextLine,
+    bodyFontSize: number,
+    columnWidth: number,
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
+) {
     return (
-        !isHardCropBlockerLine(line, bodyFontSize, columnWidth, tableCaption) &&
+        !isHardCropBlockerLine(line, bodyFontSize, columnWidth, tableCaption, bodyLayout) &&
         line.text.length > 1 &&
         (line.fontSize < bodyFontSize - 0.8 || line.width < columnWidth * 0.7)
     );
@@ -1601,10 +1843,11 @@ function safeCropExpansion(
     bodyFontSize: number,
     columnWidth: number,
     metric: PageMetrics,
-    tableCaption: boolean
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
 ) {
     return validCropRect(candidate, metric) &&
-        hardCropBlockers(candidate, lines, bodyFontSize, columnWidth, tableCaption).length == 0;
+        hardCropBlockers(candidate, lines, bodyFontSize, columnWidth, tableCaption, bodyLayout).length == 0;
 }
 
 function expandRectToAvoidSoftCuts(
@@ -1614,7 +1857,8 @@ function expandRectToAvoidSoftCuts(
     bodyFontSize: number,
     columnWidth: number,
     metric: PageMetrics,
-    tableCaption: boolean
+    tableCaption: boolean,
+    bodyLayout?: BodyLayoutModel
 ) {
     let current = rect;
     let search = expandRect(rect, 24, metric);
@@ -1622,7 +1866,7 @@ function expandRectToAvoidSoftCuts(
         ...lines
             .filter((line) =>
                 line.page == rect.page &&
-                isSoftCropAnchorLine(line, bodyFontSize, columnWidth, tableCaption)
+                isSoftCropAnchorLine(line, bodyFontSize, columnWidth, tableCaption, bodyLayout)
             )
             .map(lineRect),
         ...graphics.filter((graphic) =>
@@ -1655,7 +1899,7 @@ function expandRectToAvoidSoftCuts(
         }
 
         let next = candidates
-            .filter((candidate) => safeCropExpansion(candidate, lines, bodyFontSize, columnWidth, metric, tableCaption))
+            .filter((candidate) => safeCropExpansion(candidate, lines, bodyFontSize, columnWidth, metric, tableCaption, bodyLayout))
             .sort((a, b) => rectArea(a) - rectArea(b))[0];
         if (next) {
             current = next;
@@ -1671,22 +1915,24 @@ function avoidBodyAndEdgeCuts(
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
-    metric: PageMetrics
+    metric: PageMetrics,
+    bodyLayout?: BodyLayoutModel
 ) {
-    let trimmed = trimHardCropBlockers(rect, lines, bodyFontSize, columnWidth, metric, false);
-    return expandRectToAvoidSoftCuts(trimmed, lines, graphics, bodyFontSize, columnWidth, metric, false);
+    let trimmed = trimHardCropBlockers(rect, lines, bodyFontSize, columnWidth, metric, false, bodyLayout);
+    return expandRectToAvoidSoftCuts(trimmed, lines, graphics, bodyFontSize, columnWidth, metric, false, bodyLayout);
 }
 
 function firstCropSearchBlocker(
     searchRect: PDF_Rect,
     lines: TextLine[],
     bodyFontSize: number,
-    columnWidth: number
+    columnWidth: number,
+    bodyLayout?: BodyLayoutModel
 ) {
     let blockers = lines
         .filter((line) =>
             line.page == searchRect.page &&
-            isCropSearchBlockerLine(line, bodyFontSize, columnWidth)
+            isCropSearchBlockerLine(line, bodyFontSize, columnWidth, bodyLayout)
         )
         .map(lineRect)
         .filter((box) => rectsOverlap(searchRect, box));
@@ -1698,9 +1944,10 @@ function trimSearchRectAtBlocker(
     searchRect: PDF_Rect,
     lines: TextLine[],
     bodyFontSize: number,
-    columnWidth: number
+    columnWidth: number,
+    bodyLayout?: BodyLayoutModel
 ) {
-    let blocker = firstCropSearchBlocker(searchRect, lines, bodyFontSize, columnWidth);
+    let blocker = firstCropSearchBlocker(searchRect, lines, bodyFontSize, columnWidth, bodyLayout);
     if (!blocker) {
         return searchRect;
     }
@@ -1725,19 +1972,17 @@ function graphicAnchorsInRect(rect: PDF_Rect, graphics: PDF_GraphicObject[], met
 function textAnchorsInRect(
     rect: PDF_Rect,
     lines: TextLine[],
+    graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
-    nearRect?: PDF_Rect
+    metric: PageMetrics,
+    nearRect?: PDF_Rect,
+    bodyLayout?: BodyLayoutModel
 ) {
     return lines
         .filter((line) =>
             line.page == rect.page &&
-            !isCaptionLine(line, bodyFontSize, columnWidth) &&
-            !isAlgorithmCaptionLine(line) &&
-            !isHeadingLine(line, bodyFontSize) &&
-            !isTitleLine(line, bodyFontSize) &&
-            !isCropSearchBlockerLine(line, bodyFontSize, columnWidth) &&
-            isSoftCropAnchorLine(line, bodyFontSize, columnWidth, false)
+            isFloatTextAnchorLine(line, lines, graphics, rect, bodyFontSize, columnWidth, metric, false, bodyLayout)
         )
         .map(lineRect)
         .filter((box) =>
@@ -1750,6 +1995,177 @@ function unionAllRects(rects: PDF_Rect[]) {
     return rects.reduce((box, rect) => box ? unionRects(box, rect) : rect, null as PDF_Rect | null);
 }
 
+function horizontallyOverlapsSpan(rect: PDF_Rect, left: number, right: number) {
+    return Math.min(rectRight(rect), right) - Math.max(rect.x, left) > 0.5;
+}
+
+function verticallyOverlapsSpan(rect: PDF_Rect, bottom: number, top: number) {
+    return Math.min(rectTop(rect), top) - Math.max(rect.y, bottom) > 0.5;
+}
+
+function visibleBoxesInRect(rect: PDF_Rect, lines: TextLine[], graphics: PDF_GraphicObject[], metric: PageMetrics) {
+    return [
+        ...lines
+            .filter((line) => line.page == rect.page)
+            .map(lineRect),
+        ...graphics.filter((graphic) =>
+            graphic.page == rect.page &&
+            usefulGraphicObject(graphic, metric)
+        )
+    ].filter((box) => rectsOverlap(box, rect));
+}
+
+function whitespaceLowerEdge(contentEdge: number, blockerEdge: number, searchEdge: number, padding: number, minBand: number) {
+    let gapStart = Math.max(blockerEdge, searchEdge);
+    if (contentEdge - gapStart < minBand) {
+        return Math.max(searchEdge, contentEdge - padding);
+    }
+
+    return clamp(contentEdge - padding, gapStart + minBand * 0.35, contentEdge);
+}
+
+function whitespaceUpperEdge(contentEdge: number, blockerEdge: number, searchEdge: number, padding: number, minBand: number) {
+    let gapEnd = Math.min(blockerEdge, searchEdge);
+    if (gapEnd - contentEdge < minBand) {
+        return Math.min(searchEdge, contentEdge + padding);
+    }
+
+    return clamp(contentEdge + padding, contentEdge, gapEnd - minBand * 0.35);
+}
+
+// 図は本文や別図との間に、横方向・縦方向に空白の帯を持つことが多い。
+// 初期 anchor bbox の外側で最も近い可視要素を探し、その間の空白帯内へ crop 境界を置く。
+function fitRectToWhitespaceBars(
+    rect: PDF_Rect,
+    searchRect: PDF_Rect,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    metric: PageMetrics
+) {
+    let boxes = visibleBoxesInRect(searchRect, lines, graphics, metric);
+    let padding = Math.max(4, bodyFontSize * 0.45);
+    let minBand = Math.max(6, bodyFontSize * 0.75);
+    let left = rect.x;
+    let right = rectRight(rect);
+    let bottom = rect.y;
+    let top = rectTop(rect);
+
+    let horizontalBoxes = boxes.filter((box) => horizontallyOverlapsSpan(box, left, right));
+    let below = Math.max(
+        searchRect.y,
+        ...horizontalBoxes
+            .filter((box) => rectTop(box) <= bottom + 0.5)
+            .map(rectTop)
+    );
+    let above = Math.min(
+        rectTop(searchRect),
+        ...horizontalBoxes
+            .filter((box) => box.y >= top - 0.5)
+            .map((box) => box.y)
+    );
+    bottom = whitespaceLowerEdge(bottom, below, searchRect.y, padding, minBand);
+    top = whitespaceUpperEdge(top, above, rectTop(searchRect), padding, minBand);
+
+    let verticalBoxes = boxes.filter((box) => verticallyOverlapsSpan(box, bottom, top));
+    let leftBlocker = Math.max(
+        searchRect.x,
+        ...verticalBoxes
+            .filter((box) => rectRight(box) <= left + 0.5)
+            .map(rectRight)
+    );
+    let rightBlocker = Math.min(
+        rectRight(searchRect),
+        ...verticalBoxes
+            .filter((box) => box.x >= right - 0.5)
+            .map((box) => box.x)
+    );
+    left = whitespaceLowerEdge(left, leftBlocker, searchRect.x, padding, minBand);
+    right = whitespaceUpperEdge(right, rightBlocker, rectRight(searchRect), padding, minBand);
+
+    return intersectRects({
+        page: rect.page,
+        x: left,
+        y: bottom,
+        width: right - left,
+        height: top - bottom
+    }, searchRect) ?? rect;
+}
+
+function expandNarrowFigureToCaptionColumn(rect: PDF_Rect, captionLine: TextLine, columnWidth: number, metric: PageMetrics) {
+    if (rect.width >= captionLine.width * 0.85) {
+        return rect;
+    }
+
+    let pageMargin = 36;
+    let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
+    let left = Math.max(pageMargin, metric.minX - 12);
+    let right = Math.min(metric.width - pageMargin, columnSplit + 8);
+
+    if (isWideFigureWidth(captionLine.width, columnWidth, metric)) {
+        right = Math.min(metric.width - pageMargin, metric.maxX + 12);
+    }
+    else if (captionLine.x >= columnSplit) {
+        left = Math.max(pageMargin, columnSplit - 24);
+        right = Math.min(metric.width - pageMargin, metric.maxX + 24);
+    }
+
+    if (right - left <= rect.width) {
+        return rect;
+    }
+
+    return {...rect, x: left, width: right - left};
+}
+
+function padFigureBottomTowardCaption(rect: PDF_Rect, captionLine: TextLine, bodyFontSize: number) {
+    let bottomLimit = figureCaptionClearY(captionLine);
+    let y = Math.max(bottomLimit, rect.y - Math.max(8, bodyFontSize * 1.4));
+    return {...rect, y, height: rectTop(rect) - y};
+}
+
+function clampFigureToCaptionHalf(rect: PDF_Rect, captionLine: TextLine, metric: PageMetrics) {
+    let center = metric.width / 2;
+    let captionCenter = captionLine.x + captionLine.width / 2;
+    let sideMargin = 40;
+
+    if (rect.width > metric.width * 0.75) {
+        return rect;
+    }
+
+    if (captionCenter < center - sideMargin && rectRight(rect) > center + 8) {
+        let right = center + 8;
+        return {...rect, width: right - rect.x};
+    }
+
+    if (captionCenter > center + sideMargin && rect.x < center - 24) {
+        let x = center - 24;
+        return {...rect, x, width: rectRight(rect) - x};
+    }
+
+    return rect;
+}
+
+function connectedAnchorsAboveCaption(anchors: PDF_Rect[], captionLine: TextLine, bodyFontSize: number) {
+    let connected: PDF_Rect[] = [];
+    let prev: PDF_Rect | null = null;
+    let gapLimit = Math.max(bodyFontSize * 7.0, 64);
+
+    for (let anchor of anchors.sort((a, b) => a.y - b.y)) {
+        if (anchor.y < captionLine.y) {
+            continue;
+        }
+
+        if (prev && anchor.y - rectTop(prev) > gapLimit) {
+            break;
+        }
+
+        connected.push(anchor);
+        prev = prev ? unionRects(prev, anchor) : anchor;
+    }
+
+    return connected;
+}
+
 // Figure はキャプション側から探索し、本文・見出し・別キャプションを禁止境界として切る。
 // 描画オブジェクトをクラスタリングせず、探索窓内の描画 bbox とその近くの小さな図中文字だけを使う。
 function fitRectByCaptionSearch(
@@ -1759,24 +2175,32 @@ function fitRectByCaptionSearch(
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
-    metric: PageMetrics
+    metric: PageMetrics,
+    bodyLayout?: BodyLayoutModel
 ) {
     let rawSearchRect = graphicSearchRect(captionLine, rect, false, columnWidth, metric);
-    let searchRect = trimSearchRectAtBlocker(rawSearchRect, lines, bodyFontSize, columnWidth);
+    let searchRect = trimSearchRectAtBlocker(rawSearchRect, lines, bodyFontSize, columnWidth, bodyLayout);
     let rawGraphicAnchors = graphicAnchorsInRect(searchRect, graphics, metric);
     let graphicBox = unionAllRects(rawGraphicAnchors);
     let textSearchRect = graphicBox ? expandRect(graphicBox, 18, metric) : searchRect;
-    let textAnchors = textAnchorsInRect(searchRect, lines, bodyFontSize, columnWidth, textSearchRect);
-    let anchors = [...rawGraphicAnchors, ...textAnchors];
+    let textAnchors = textAnchorsInRect(searchRect, lines, graphics, bodyFontSize, columnWidth, metric, textSearchRect, bodyLayout);
+    let anchors = connectedAnchorsAboveCaption([...rawGraphicAnchors, ...textAnchors], captionLine, bodyFontSize);
     let fitted = unionAllRects(anchors);
 
     if (!fitted || rectArea(fitted) < 120) {
-        return avoidBodyAndEdgeCuts(rect, lines, graphics, bodyFontSize, columnWidth, metric);
+        return avoidBodyAndEdgeCuts(rect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
     }
 
-    fitted = expandRect(fitted, 8, metric);
+    fitted = fitRectToWhitespaceBars(fitted, searchRect, lines, graphics, bodyFontSize, metric);
     let finalRect = intersectRects(fitted, searchRect) ?? rect;
-    return avoidBodyAndEdgeCuts(finalRect, lines, graphics, bodyFontSize, columnWidth, metric);
+    finalRect = padFigureBottomTowardCaption(finalRect, captionLine, bodyFontSize);
+    if (
+        rectArea(finalRect) < rectArea(rect) * 0.65 &&
+        hardCropBlockers(rect, lines, bodyFontSize, columnWidth, false, bodyLayout).length == 0
+    ) {
+        finalRect = rect;
+    }
+    return avoidBodyAndEdgeCuts(finalRect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
 }
 
 // Figure 内の軸ラベルや凡例は本文より小さいフォントで抽出されることが多い。
@@ -1968,7 +2392,8 @@ function collectFigureCandidates(
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
-    pageMetrics: Map<number, PageMetrics>
+    pageMetrics: Map<number, PageMetrics>,
+    bodyLayout: BodyLayoutModel
 ) {
     let candidates: FigureCandidate[] = [];
 
@@ -2028,7 +2453,7 @@ function collectFigureCandidates(
 
         let rect = estimateFigureRect(caption, line, columnWidth, metric);
         if (rect && isTableCaption(caption)) {
-            rect = fitTableRectToInnerText(rect, lines, line, endIndex, bodyFontSize, columnWidth, metric) ??
+            rect = fitTableRectToInnerText(rect, lines, graphics, line, endIndex, bodyFontSize, columnWidth, metric, bodyLayout) ??
                 trimTableRectAtBodyText(rect, lines, endIndex, bodyFontSize, columnWidth);
             rect = expandTableRectToRules(rect, graphics, metric);
         }
@@ -2036,11 +2461,25 @@ function collectFigureCandidates(
             let fallbackRect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
             rect = fitFigureRectToInnerText(rect, lines, bodyFontSize, columnWidth, metric);
-            rect = fitRectByCaptionSearch(rect, line, lines, graphics, bodyFontSize, columnWidth, metric);
+            rect = fitRectByCaptionSearch(rect, line, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
+            rect = expandNarrowFigureToCaptionColumn(rect, line, columnWidth, metric);
             rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth);
-            if ((rect.height < 36 || rect.width < 80) && rectArea(fallbackRect) > rectArea(rect)) {
-                rect = fallbackRect;
+            let fallbackCandidate = trimFigureRectAtPreviousCaption(fallbackRect, lines, bodyFontSize, columnWidth);
+            let fallbackCoversWidth = fallbackCandidate.width > rect.width * 1.2 &&
+                rect.width < line.width * 0.85;
+            let severelyThin = rect.height < 36 || rect.width < 80;
+            let fallbackLarger = rectArea(fallbackCandidate) > rectArea(rect) &&
+                (
+                    severelyThin ||
+                    rectArea(rect) < rectArea(fallbackRect) * 0.65
+                );
+            let fallbackSafe =
+                hardCropBlockers(fallbackCandidate, lines, bodyFontSize, columnWidth, false, bodyLayout).length == 0;
+            if ((fallbackLarger || fallbackCoversWidth) && (fallbackSafe || severelyThin)) {
+                rect = fallbackCandidate;
             }
+            rect = padFigureBottomTowardCaption(rect, line, bodyFontSize);
+            rect = clampFigureToCaptionHalf(rect, line, metric);
         }
 
         candidates.push({
@@ -2108,8 +2547,9 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
         .filter((line) => !isPageDecoration(line));
 
     // 読み順にした行から Figure/Table を先に集め、後続の本文抽出で除外できる形にする。
+    let bodyLayout = estimateBodyLayout(lines, bodyFontSize, columnWidth);
     let readingLines = sortLinesForReading(lines);
-    let figures = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics);
+    let figures = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics, bodyLayout);
     let figureByStart = new Map(figures.map((figure) => [figure.startIndex, figure]));
     let captionLineIndices = new Set<number>();
     let figureRects = figures
