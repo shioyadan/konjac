@@ -45,12 +45,13 @@ const fs = require("fs") as {
 const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
-    console.error("usage: node dist/cli.cjs [--html|--json] [--debug-mask <dir>] <pdf-file>");
+    console.error("usage: node dist/cli.cjs [--html|--json] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
 }
 
 function parseArgs(args: string[]) {
     let mode: OutputMode = "html";
     let debugMaskDir = "";
+    let debugScanCaption = "";
     let fileName = "";
 
     for (let i = 0; i < args.length; i++) {
@@ -75,6 +76,20 @@ function parseArgs(args: string[]) {
                 return null;
             }
         }
+        else if (arg == "--debug-scan") {
+            debugScanCaption = args[++i] ?? "";
+            if (!debugScanCaption) {
+                usage();
+                return null;
+            }
+        }
+        else if (arg.startsWith("--debug-scan=")) {
+            debugScanCaption = arg.slice("--debug-scan=".length);
+            if (!debugScanCaption) {
+                usage();
+                return null;
+            }
+        }
         else if (arg == "-h" || arg == "--help") {
             usage();
             return null;
@@ -93,7 +108,7 @@ function parseArgs(args: string[]) {
         return null;
     }
 
-    return {mode, fileName, debugMaskDir};
+    return {mode, fileName, debugMaskDir, debugScanCaption};
 }
 
 async function renderPageCanvas(page: any) {
@@ -169,7 +184,7 @@ function writeDebugMaskDump(dir: string, dump: PDF_DebugMaskDump) {
     fs.writeFileSync(`${base}/page-${String(dump.page).padStart(3, "0")}-mask.svg`, dump.svg);
 }
 
-async function extractPDFFile(fileName: string, renderImages: boolean, debugMaskDir?: string) {
+async function extractPDFFile(fileName: string, renderImages: boolean, debugMaskDir?: string, debugScanCaption?: string) {
     let loadingTask = pdfjsLib.getDocument({
         url: fileName,
         cMapPacked: true,
@@ -187,10 +202,11 @@ async function extractPDFFile(fileName: string, renderImages: boolean, debugMask
         pageProxies.push(page);
     }
 
-    let nodes = extractNodesFromPages(pages, debugMaskDir
-        ? {debugMaskSink: (dump) => writeDebugMaskDump(debugMaskDir, dump)}
-        : undefined
-    );
+    let extractOptions = {
+        ...(debugMaskDir ? {debugMaskSink: (dump: PDF_DebugMaskDump) => writeDebugMaskDump(debugMaskDir, dump)} : {}),
+        ...(debugScanCaption ? {debugScanCaption, debugScanSink: (message: string) => console.error(message)} : {})
+    };
+    let nodes = extractNodesFromPages(pages, debugMaskDir || debugScanCaption ? extractOptions : undefined);
     if (renderImages) {
         await attachFigureImages(nodes, pageProxies);
     }
@@ -204,7 +220,7 @@ async function main() {
         return;
     }
 
-    let nodes = await extractPDFFile(options.fileName, options.mode == "html", options.debugMaskDir);
+    let nodes = await extractPDFFile(options.fileName, options.mode == "html", options.debugMaskDir, options.debugScanCaption);
     if (options.mode == "json") {
         console.log(JSON.stringify(nodes, null, 2));
     }
