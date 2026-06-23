@@ -163,8 +163,41 @@ interface FigureCandidate {
     startIndex: number;
     // 複数行キャプションの最終行。
     endIndex: number;
+    // この図表ノードにまとめたキャプション行。
+    captionLines: TextLine[];
     // 出力する図表ノード。
     node: PDF_Node;
+}
+
+// CLI などで内部の空間分類を確認するためのデバッグ出力。
+export interface PDF_DebugMaskDump {
+    // 対象ページ。
+    page: number;
+    // 生成した bitmap の横セル数。
+    width: number;
+    // 生成した bitmap の縦セル数。
+    height: number;
+    // 1 セルが表す PDF 座標上の長さ。
+    cellSize: number;
+    // ブラウザでそのまま確認できる SVG。
+    svg: string;
+}
+
+export interface PDF_ExtractOptions {
+    // 指定された場合だけ、ページごとの属性付き occupancy bitmap を呼び出し側へ渡す。
+    debugMaskSink?: (dump: PDF_DebugMaskDump) => void;
+}
+
+interface OccupancyMask {
+    page: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    cellSize: number;
+    cells: Uint8Array;
+    debugLineCount: number;
+    debugGraphicCount: number;
 }
 
 type Matrix = [number, number, number, number, number, number];
@@ -174,6 +207,15 @@ const LINE_Y_EPSILON = 2.0;
 // 同一 y 座標上で別行・別カラムとみなす横方向の隙間。
 const COLUMN_GAP = 14.0;
 const IDENTITY_MATRIX: Matrix = [1, 0, 0, 1, 0, 0];
+const OCCUPANCY_CELL_SIZE = 2.0;
+const MASK_BODY = 1 << 0;
+const MASK_SHAPE = 1 << 1;
+const MASK_FLOAT_TEXT = 1 << 2;
+const MASK_CAPTION = 1 << 3;
+const MASK_HEADING = 1 << 4;
+const MASK_OTHER_TEXT = 1 << 5;
+const MASK_CROP = 1 << 6;
+const MASK_CONTENT = MASK_BODY | MASK_SHAPE | MASK_FLOAT_TEXT | MASK_CAPTION | MASK_HEADING | MASK_OTHER_TEXT;
 
 function multiplyMatrix(a: Matrix, b: Matrix): Matrix {
     return [
@@ -255,18 +297,57 @@ function operatorPathBox(args: unknown[]) {
     return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
 }
 
+function colorComponent(value: unknown) {
+    let number = Number(value ?? 0);
+    return number > 1 ? number / 255 : number;
+}
+
+function rgbColor(args: unknown[]) {
+    return [
+        colorComponent(args[0]),
+        colorComponent(args[1]),
+        colorComponent(args[2])
+    ] as const;
+}
+
+function isNearWhite(color: readonly number[]) {
+    return color.length >= 3 && color.every((component) => component >= 0.97);
+}
+
 // PDF.js の operator list から、実際に stroke/fill された path と画像の外接矩形を取り出す。
 async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Record<string, number>) {
     let operatorList = await page.getOperatorList();
     let graphics: PDF_GraphicObject[] = [];
     let ctm: Matrix = [...IDENTITY_MATRIX];
-    let stack: Array<{ctm: Matrix; lineWidth: number}> = [];
+    let stack: Array<{
+        ctm: Matrix;
+        lineWidth: number;
+        fillColor: readonly number[];
+        strokeColor: readonly number[];
+        clip: PDF_Rect | null;
+    }> = [];
     let lineWidth = 1;
+    let fillColor: readonly number[] = [0, 0, 0];
+    let strokeColor: readonly number[] = [0, 0, 0];
+    let clip: PDF_Rect | null = null;
     let pendingPath: PDF_GraphicObject | null = null;
 
-    function paintPendingPath() {
+    function paintPendingPath(usesFill: boolean, usesStroke: boolean) {
         if (pendingPath) {
-            graphics.push(pendingPath);
+            let invisibleWhite =
+                (!usesFill || isNearWhite(fillColor)) &&
+                (!usesStroke || isNearWhite(strokeColor));
+            let visiblePath = clip ? intersectRectsLoose(pendingPath, clip) : pendingPath;
+            if (!invisibleWhite && visiblePath) {
+                graphics.push({...pendingPath, ...visiblePath});
+            }
+            pendingPath = null;
+        }
+    }
+
+    function applyPendingClip() {
+        if (pendingPath) {
+            clip = clip ? intersectRectsLoose(clip, pendingPath) : pendingPath;
             pendingPath = null;
         }
     }
@@ -276,13 +357,16 @@ async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Recor
         let args = operatorList.argsArray[i] ?? [];
 
         if (fn == ops.save) {
-            stack.push({ctm: [...ctm], lineWidth});
+            stack.push({ctm: [...ctm], lineWidth, fillColor, strokeColor, clip});
         }
         else if (fn == ops.restore) {
             let state = stack.pop();
             if (state) {
                 ctm = state.ctm;
                 lineWidth = state.lineWidth;
+                fillColor = state.fillColor;
+                strokeColor = state.strokeColor;
+                clip = state.clip;
             }
         }
         else if (fn == ops.transform) {
@@ -290,6 +374,12 @@ async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Recor
         }
         else if (fn == ops.setLineWidth && typeof args[0] == "number") {
             lineWidth = args[0];
+        }
+        else if (fn == ops.setFillRGBColor) {
+            fillColor = rgbColor(args);
+        }
+        else if (fn == ops.setStrokeRGBColor) {
+            strokeColor = rgbColor(args);
         }
         else if (fn == ops.constructPath) {
             let box = operatorPathBox(args);
@@ -299,22 +389,33 @@ async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Recor
         else if (
             fn == ops.stroke ||
             fn == ops.closeStroke ||
-            fn == ops.fill ||
-            fn == ops.eoFill ||
             fn == ops.fillStroke ||
             fn == ops.eoFillStroke ||
             fn == ops.closeFillStroke ||
             fn == ops.closeEOFillStroke
         ) {
-            paintPendingPath();
+            let strokeOnly = fn == ops.stroke || fn == ops.closeStroke;
+            paintPendingPath(!strokeOnly, true);
+        }
+        else if (
+            fn == ops.fill ||
+            fn == ops.eoFill
+        ) {
+            paintPendingPath(true, false);
         }
         else if (fn == ops.clip || fn == ops.eoClip || fn == ops.endPath) {
-            pendingPath = null;
+            if (fn == ops.clip || fn == ops.eoClip) {
+                applyPendingClip();
+            }
+            else {
+                pendingPath = null;
+            }
         }
         else if (fn == ops.paintImageXObject || fn == ops.paintJpegXObject || fn == ops.paintInlineImageXObject) {
             let object = transformBox(pageNumber, ctm, [0, 0, 1, 1], 0, "image");
-            if (object) {
-                graphics.push(object);
+            let visibleObject = object && clip ? intersectRectsLoose(object, clip) : object;
+            if (object && visibleObject) {
+                graphics.push({...object, ...visibleObject});
             }
         }
         else if (fn == ops.paintFormXObjectBegin) {
@@ -1037,11 +1138,35 @@ function rectsOverlap(a: PDF_Rect, b: PDF_Rect, margin = 0) {
     );
 }
 
+function rectContainsRect(outer: PDF_Rect, inner: PDF_Rect, margin = 0) {
+    return outer.page == inner.page &&
+        inner.x >= outer.x - margin &&
+        rectRight(inner) <= rectRight(outer) + margin &&
+        inner.y >= outer.y - margin &&
+        rectTop(inner) <= rectTop(outer) + margin;
+}
+
 function unionRects(a: PDF_Rect, b: PDF_Rect): PDF_Rect {
     let x = Math.min(a.x, b.x);
     let y = Math.min(a.y, b.y);
     let right = Math.max(rectRight(a), rectRight(b));
     let top = Math.max(rectTop(a), rectTop(b));
+    return {page: a.page, x, y, width: right - x, height: top - y};
+}
+
+function intersectRectsLoose(a: PDF_Rect, b: PDF_Rect) {
+    if (a.page != b.page) {
+        return null;
+    }
+
+    let x = Math.max(a.x, b.x);
+    let y = Math.max(a.y, b.y);
+    let right = Math.min(rectRight(a), rectRight(b));
+    let top = Math.min(rectTop(a), rectTop(b));
+    if (right <= x || top <= y) {
+        return null;
+    }
+
     return {page: a.page, x, y, width: right - x, height: top - y};
 }
 
@@ -1958,11 +2083,41 @@ function trimSearchRectAtBlocker(
     return {...searchRect, height: top - searchRect.y};
 }
 
-function graphicAnchorsInRect(rect: PDF_Rect, graphics: PDF_GraphicObject[], metric: PageMetrics) {
+function graphicExcludedByCaption(graphic: PDF_GraphicObject, captionLines: TextLine[], metric: PageMetrics) {
+    if (graphic.kind != "path") {
+        return false;
+    }
+
+    let graphicBox = expandRect(graphic, Math.max(2, graphic.strokeWidth ?? 1), metric);
+    return captionLines.some((line) => {
+        let captionBox = lineRect(line);
+        return rectsOverlap(graphicBox, captionBox, 1) ||
+            rectContainsRect(graphicBox, captionBox, 2);
+    });
+}
+
+function excludedCaptionGraphics(graphics: PDF_GraphicObject[], figures: FigureCandidate[], metric: PageMetrics) {
+    let captionLines = figures
+        .flatMap((figure) => figure.captionLines)
+        .filter((line) => line.page == metric.page);
+
+    if (captionLines.length == 0) {
+        return [];
+    }
+
+    return graphics.filter((graphic) =>
+        graphic.page == metric.page &&
+        usefulGraphicObject(graphic, metric) &&
+        graphicExcludedByCaption(graphic, captionLines, metric)
+    );
+}
+
+function graphicAnchorsInRect(rect: PDF_Rect, graphics: PDF_GraphicObject[], metric: PageMetrics, captionLines: TextLine[] = []) {
     return graphics
         .filter((graphic) =>
             graphic.page == rect.page &&
             usefulGraphicObject(graphic, metric) &&
+            !graphicExcludedByCaption(graphic, captionLines, metric) &&
             rectsOverlap(graphic, rect)
         )
         .map((graphic) => intersectRects(expandRect(graphic, Math.max(3, graphic.strokeWidth ?? 1), metric), rect))
@@ -1995,101 +2150,443 @@ function unionAllRects(rects: PDF_Rect[]) {
     return rects.reduce((box, rect) => box ? unionRects(box, rect) : rect, null as PDF_Rect | null);
 }
 
-function horizontallyOverlapsSpan(rect: PDF_Rect, left: number, right: number) {
-    return Math.min(rectRight(rect), right) - Math.max(rect.x, left) > 0.5;
+function createOccupancyMask(rect: PDF_Rect, cellSize = OCCUPANCY_CELL_SIZE): OccupancyMask {
+    return {
+        page: rect.page,
+        x: rect.x,
+        y: rect.y,
+        width: Math.max(1, Math.ceil(rect.width / cellSize)),
+        height: Math.max(1, Math.ceil(rect.height / cellSize)),
+        cellSize,
+        cells: new Uint8Array(
+            Math.max(1, Math.ceil(rect.width / cellSize)) *
+            Math.max(1, Math.ceil(rect.height / cellSize))
+        ),
+        debugLineCount: 0,
+        debugGraphicCount: 0
+    };
 }
 
-function verticallyOverlapsSpan(rect: PDF_Rect, bottom: number, top: number) {
-    return Math.min(rectTop(rect), top) - Math.max(rect.y, bottom) > 0.5;
-}
-
-function visibleBoxesInRect(rect: PDF_Rect, lines: TextLine[], graphics: PDF_GraphicObject[], metric: PageMetrics) {
-    return [
-        ...lines
-            .filter((line) => line.page == rect.page)
-            .map(lineRect),
-        ...graphics.filter((graphic) =>
-            graphic.page == rect.page &&
-            usefulGraphicObject(graphic, metric)
-        )
-    ].filter((box) => rectsOverlap(box, rect));
-}
-
-function whitespaceLowerEdge(contentEdge: number, blockerEdge: number, searchEdge: number, padding: number, minBand: number) {
-    let gapStart = Math.max(blockerEdge, searchEdge);
-    if (contentEdge - gapStart < minBand) {
-        return Math.max(searchEdge, contentEdge - padding);
+function maskRectRange(mask: OccupancyMask, rect: PDF_Rect) {
+    if (rect.page != mask.page) {
+        return null;
     }
 
-    return clamp(contentEdge - padding, gapStart + minBand * 0.35, contentEdge);
-}
-
-function whitespaceUpperEdge(contentEdge: number, blockerEdge: number, searchEdge: number, padding: number, minBand: number) {
-    let gapEnd = Math.min(blockerEdge, searchEdge);
-    if (gapEnd - contentEdge < minBand) {
-        return Math.min(searchEdge, contentEdge + padding);
+    let left = Math.max(rect.x, mask.x);
+    let right = Math.min(rectRight(rect), mask.x + mask.width * mask.cellSize);
+    let bottom = Math.max(rect.y, mask.y);
+    let top = Math.min(rectTop(rect), mask.y + mask.height * mask.cellSize);
+    if (right <= left || top <= bottom) {
+        return null;
     }
 
-    return clamp(contentEdge + padding, contentEdge, gapEnd - minBand * 0.35);
+    let x0 = clamp(Math.floor((left - mask.x) / mask.cellSize), 0, mask.width);
+    let x1 = clamp(Math.ceil((right - mask.x) / mask.cellSize), x0, mask.width);
+    let y0 = clamp(Math.floor((bottom - mask.y) / mask.cellSize), 0, mask.height);
+    let y1 = clamp(Math.ceil((top - mask.y) / mask.cellSize), y0, mask.height);
+    if (x1 <= x0 || y1 <= y0) {
+        return null;
+    }
+
+    return {x0, x1, y0, y1};
 }
 
-// 図は本文や別図との間に、横方向・縦方向に空白の帯を持つことが多い。
-// 初期 anchor bbox の外側で最も近い可視要素を探し、その間の空白帯内へ crop 境界を置く。
-function fitRectToWhitespaceBars(
+function drawRectToMask(mask: OccupancyMask, rect: PDF_Rect, bits: number) {
+    let range = maskRectRange(mask, rect);
+    if (!range) {
+        return;
+    }
+
+    for (let y = range.y0; y < range.y1; y++) {
+        let offset = y * mask.width;
+        for (let x = range.x0; x < range.x1; x++) {
+            mask.cells[offset + x] |= bits;
+        }
+    }
+}
+
+function drawRectOutlineToMask(mask: OccupancyMask, rect: PDF_Rect, bits: number) {
+    let t = mask.cellSize * 2;
+    drawRectToMask(mask, {page: rect.page, x: rect.x, y: rect.y, width: rect.width, height: t}, bits);
+    drawRectToMask(mask, {page: rect.page, x: rect.x, y: rectTop(rect) - t, width: rect.width, height: t}, bits);
+    drawRectToMask(mask, {page: rect.page, x: rect.x, y: rect.y, width: t, height: rect.height}, bits);
+    drawRectToMask(mask, {page: rect.page, x: rectRight(rect) - t, y: rect.y, width: t, height: rect.height}, bits);
+}
+
+function lineOccupancyBits(
+    line: TextLine,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    bodyLayout?: BodyLayoutModel
+) {
+    if (isCaptionLine(line, bodyFontSize, columnWidth) || isAlgorithmCaptionLine(line)) {
+        return MASK_CAPTION;
+    }
+    if (isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize)) {
+        return MASK_HEADING;
+    }
+    if (
+        isParagraphLikeLine(line, bodyFontSize, columnWidth) ||
+        isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) ||
+        isBodySizedProseFragment(line, bodyFontSize) ||
+        isBodyTextForOccupancyMask(line, bodyFontSize, columnWidth)
+    ) {
+        return MASK_BODY;
+    }
+    if (
+        line.fontSize < bodyFontSize - 0.8 ||
+        line.width < columnWidth * 0.7 ||
+        lineNearGraphics(line, graphics, metric)
+    ) {
+        return MASK_FLOAT_TEXT;
+    }
+    return MASK_OTHER_TEXT;
+}
+
+function isBodyTextForOccupancyMask(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    return Math.abs(line.fontSize - bodyFontSize) <= 1.2 &&
+        line.width > Math.min(90, columnWidth * 0.32) &&
+        line.text.length > 14 &&
+        /[a-z]{3,}/i.test(line.text) &&
+        /\s/.test(line.text);
+}
+
+function paintOccupancyMask(
+    mask: OccupancyMask,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    bodyLayout?: BodyLayoutModel
+) {
+    for (let graphic of graphics) {
+        if (graphic.page == mask.page && usefulGraphicObject(graphic, metric)) {
+            mask.debugGraphicCount++;
+            drawRectToMask(mask, expandRect(graphic, Math.max(1, graphic.strokeWidth ?? 1), metric), MASK_SHAPE);
+        }
+    }
+
+    for (let line of lines) {
+        if (line.page == mask.page) {
+            mask.debugLineCount++;
+            drawRectToMask(
+                mask,
+                lineRect(line),
+                lineOccupancyBits(line, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout)
+            );
+        }
+    }
+}
+
+function buildOccupancyMask(
+    rect: PDF_Rect,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    bodyLayout?: BodyLayoutModel
+) {
+    let mask = createOccupancyMask(rect);
+    paintOccupancyMask(mask, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
+    return mask;
+}
+
+function rowMostlyEmpty(mask: OccupancyMask, y: number, x0: number, x1: number) {
+    let occupied = 0;
+    for (let x = x0; x < x1; x++) {
+        if ((mask.cells[y * mask.width + x] & MASK_CONTENT) != 0) {
+            occupied++;
+        }
+    }
+    return occupied <= Math.max(1, Math.floor((x1 - x0) * 0.02));
+}
+
+function columnMostlyEmpty(mask: OccupancyMask, x: number, y0: number, y1: number) {
+    let occupied = 0;
+    for (let y = y0; y < y1; y++) {
+        if ((mask.cells[y * mask.width + x] & MASK_CONTENT) != 0) {
+            occupied++;
+        }
+    }
+    return occupied <= Math.max(1, Math.floor((y1 - y0) * 0.02));
+}
+
+function lowerWhitespaceIndex(
+    isEmpty: (index: number) => boolean,
+    edge: number,
+    padding: number,
+    minBand: number
+) {
+    let runEnd = -1;
+    for (let i = edge - 1; i >= 0; i--) {
+        if (!isEmpty(i)) {
+            runEnd = -1;
+            continue;
+        }
+
+        if (runEnd < 0) {
+            runEnd = i;
+        }
+        if (runEnd - i + 1 >= minBand) {
+            return clamp(runEnd + 1 - padding, i + Math.ceil(minBand * 0.35), runEnd + 1);
+        }
+    }
+
+    return Math.max(0, edge - padding);
+}
+
+function upperWhitespaceIndex(
+    isEmpty: (index: number) => boolean,
+    edge: number,
+    limit: number,
+    padding: number,
+    minBand: number
+) {
+    let runStart = -1;
+    for (let i = edge; i < limit; i++) {
+        if (!isEmpty(i)) {
+            runStart = -1;
+            continue;
+        }
+
+        if (runStart < 0) {
+            runStart = i;
+        }
+        if (i - runStart + 1 >= minBand) {
+            return clamp(runStart + padding, runStart, i + 1 - Math.ceil(minBand * 0.35));
+        }
+    }
+
+    return Math.min(limit, edge + padding);
+}
+
+// bbox 群を属性付き bitmap に落として、周囲に連続した空白セルの帯がある位置へ境界を寄せる。
+function fitRectToOccupancyWhitespace(
     rect: PDF_Rect,
     searchRect: PDF_Rect,
     lines: TextLine[],
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
-    metric: PageMetrics
+    columnWidth: number,
+    metric: PageMetrics,
+    bodyLayout?: BodyLayoutModel
 ) {
-    let boxes = visibleBoxesInRect(searchRect, lines, graphics, metric);
-    let padding = Math.max(4, bodyFontSize * 0.45);
-    let minBand = Math.max(6, bodyFontSize * 0.75);
-    let left = rect.x;
-    let right = rectRight(rect);
-    let bottom = rect.y;
-    let top = rectTop(rect);
+    let mask = buildOccupancyMask(searchRect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
+    let range = maskRectRange(mask, rect);
+    if (!range) {
+        return rect;
+    }
 
-    let horizontalBoxes = boxes.filter((box) => horizontallyOverlapsSpan(box, left, right));
-    let below = Math.max(
-        searchRect.y,
-        ...horizontalBoxes
-            .filter((box) => rectTop(box) <= bottom + 0.5)
-            .map(rectTop)
-    );
-    let above = Math.min(
-        rectTop(searchRect),
-        ...horizontalBoxes
-            .filter((box) => box.y >= top - 0.5)
-            .map((box) => box.y)
-    );
-    bottom = whitespaceLowerEdge(bottom, below, searchRect.y, padding, minBand);
-    top = whitespaceUpperEdge(top, above, rectTop(searchRect), padding, minBand);
+    let padding = Math.max(1, Math.ceil(Math.max(4, bodyFontSize * 0.45) / mask.cellSize));
+    let minBand = Math.max(2, Math.ceil(Math.max(6, bodyFontSize * 0.75) / mask.cellSize));
+    let x0 = range.x0;
+    let x1 = range.x1;
+    let y0 = range.y0;
+    let y1 = range.y1;
 
-    let verticalBoxes = boxes.filter((box) => verticallyOverlapsSpan(box, bottom, top));
-    let leftBlocker = Math.max(
-        searchRect.x,
-        ...verticalBoxes
-            .filter((box) => rectRight(box) <= left + 0.5)
-            .map(rectRight)
-    );
-    let rightBlocker = Math.min(
-        rectRight(searchRect),
-        ...verticalBoxes
-            .filter((box) => box.x >= right - 0.5)
-            .map((box) => box.x)
-    );
-    left = whitespaceLowerEdge(left, leftBlocker, searchRect.x, padding, minBand);
-    right = whitespaceUpperEdge(right, rightBlocker, rectRight(searchRect), padding, minBand);
+    y0 = lowerWhitespaceIndex((y) => rowMostlyEmpty(mask, y, x0, x1), y0, padding, minBand);
+    y1 = upperWhitespaceIndex((y) => rowMostlyEmpty(mask, y, x0, x1), y1, mask.height, padding, minBand);
+    x0 = lowerWhitespaceIndex((x) => columnMostlyEmpty(mask, x, y0, y1), x0, padding, minBand);
+    x1 = upperWhitespaceIndex((x) => columnMostlyEmpty(mask, x, y0, y1), x1, mask.width, padding, minBand);
 
-    return intersectRects({
+    let fitted = {
         page: rect.page,
-        x: left,
-        y: bottom,
-        width: right - left,
-        height: top - bottom
-    }, searchRect) ?? rect;
+        x: mask.x + x0 * mask.cellSize,
+        y: mask.y + y0 * mask.cellSize,
+        width: Math.max(mask.cellSize, (x1 - x0) * mask.cellSize),
+        height: Math.max(mask.cellSize, (y1 - y0) * mask.cellSize)
+    };
+
+    return intersectRects(fitted, searchRect) ?? rect;
+}
+
+function colorToSVG(color: [number, number, number]) {
+    return `rgb(${color[0]} ${color[1]} ${color[2]})`;
+}
+
+function appendMaskLayerSVG(
+    svg: string[],
+    mask: OccupancyMask,
+    bit: number,
+    color: [number, number, number],
+    opacity: number
+) {
+    svg.push(`<g fill="${colorToSVG(color)}" fill-opacity="${opacity}">`);
+
+    for (let y = 0; y < mask.height; y++) {
+        let runStart = -1;
+        for (let x = 0; x < mask.width; x++) {
+            let visible = (mask.cells[y * mask.width + x] & bit) != 0;
+            if (!visible) {
+                if (runStart >= 0) {
+                    svg.push(`<rect x="${mask.x + runStart * mask.cellSize}" y="${mask.y + y * mask.cellSize}" width="${(x - runStart) * mask.cellSize}" height="${mask.cellSize}"/>`);
+                    runStart = -1;
+                }
+                continue;
+            }
+            if (runStart < 0) {
+                runStart = x;
+            }
+        }
+        if (runStart >= 0) {
+            svg.push(`<rect x="${mask.x + runStart * mask.cellSize}" y="${mask.y + y * mask.cellSize}" width="${(mask.width - runStart) * mask.cellSize}" height="${mask.cellSize}"/>`);
+        }
+    }
+
+    svg.push(`</g>`);
+}
+
+function appendBBoxLayerSVG(
+    svg: string[],
+    rects: PDF_Rect[],
+    stroke: [number, number, number],
+    opacity: number,
+    strokeWidth: number,
+    dash = ""
+) {
+    let dashAttr = dash ? ` stroke-dasharray="${dash}"` : "";
+    svg.push(`<g fill="none" stroke="${colorToSVG(stroke)}" stroke-opacity="${opacity}" stroke-width="${strokeWidth}"${dashAttr}>`);
+    for (let rect of rects) {
+        svg.push(`<rect x="${rect.x}" y="${rect.y}" width="${rect.width}" height="${rect.height}"/>`);
+    }
+    svg.push(`</g>`);
+}
+
+function lineRectsByMaskBit(
+    lines: TextLine[],
+    bit: number,
+    graphics: PDF_GraphicObject[],
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    bodyLayout: BodyLayoutModel
+) {
+    return lines
+        .filter((line) =>
+            line.page == metric.page &&
+            (lineOccupancyBits(line, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout) & bit) != 0
+        )
+        .map(lineRect);
+}
+
+function isOuterFrameLikeGraphic(graphic: PDF_GraphicObject, metric: PageMetrics) {
+    return graphic.width > metric.width * 0.45 &&
+        graphic.height > metric.height * 0.35 &&
+        graphic.x >= -metric.width * 0.05 &&
+        graphic.y >= -metric.height * 0.05 &&
+        rectRight(graphic) <= metric.width * 1.05 &&
+        rectTop(graphic) <= metric.height * 1.05;
+}
+
+function occupancyMaskToSVG(
+    mask: OccupancyMask,
+    metric: PageMetrics,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    figures: FigureCandidate[],
+    bodyFontSize: number,
+    columnWidth: number,
+    bodyLayout: BodyLayoutModel
+): PDF_DebugMaskDump {
+    let pageWidth = mask.width * mask.cellSize;
+    let pageHeight = mask.height * mask.cellSize;
+    let flipY = mask.y * 2 + pageHeight;
+    let occupiedCells = mask.cells.reduce((count, bits) => count + (bits == 0 ? 0 : 1), 0);
+    let pageLines = lines.filter((line) => line.page == mask.page);
+    let pageGraphics = graphics.filter((graphic) => graphic.page == mask.page && usefulGraphicObject(graphic, metric));
+    let pageExcludedGraphics = excludedCaptionGraphics(graphics, figures, metric);
+    let pageExcludedOuterFrames = pageExcludedGraphics.filter((graphic) => isOuterFrameLikeGraphic(graphic, metric));
+    let pageAnchorGraphics = pageGraphics.filter((graphic) => !pageExcludedGraphics.includes(graphic));
+    let pageFigures = figures
+        .map((figure) => figure.node.rect)
+        .filter((rect): rect is PDF_Rect => rect?.page == mask.page);
+    let svg: string[] = [
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${pageWidth}" height="${pageHeight}" viewBox="${mask.x} ${mask.y} ${pageWidth} ${pageHeight}">`,
+        `<!-- page=${mask.page} lines=${mask.debugLineCount} graphics=${mask.debugGraphicCount} crops=${pageFigures.length} occupiedCells=${occupiedCells} -->`,
+        `<rect x="${mask.x}" y="${mask.y}" width="${pageWidth}" height="${pageHeight}" fill="white"/>`,
+        `<g transform="translate(0 ${flipY}) scale(1 -1)" shape-rendering="crispEdges">`
+    ];
+
+    // 1 セルに複数属性が立つので、単一色へ潰さず半透明レイヤとして重ねて表示する。
+    appendMaskLayerSVG(svg, mask, MASK_SHAPE, [40, 105, 220], 0.28);
+    appendMaskLayerSVG(svg, mask, MASK_OTHER_TEXT, [210, 210, 210], 0.6);
+    appendMaskLayerSVG(svg, mask, MASK_BODY, [80, 80, 80], 0.7);
+    appendMaskLayerSVG(svg, mask, MASK_FLOAT_TEXT, [40, 160, 80], 0.55);
+    appendMaskLayerSVG(svg, mask, MASK_CAPTION, [220, 55, 45], 0.78);
+    appendMaskLayerSVG(svg, mask, MASK_HEADING, [155, 80, 185], 0.78);
+    appendMaskLayerSVG(svg, mask, MASK_CROP, [255, 200, 0], 0.9);
+
+    // 細い枠線は bitmap 化前の元 bbox。大きな mask が元 bbox 由来か、塗りの連結かを確認する。
+    appendBBoxLayerSVG(svg, pageAnchorGraphics, [0, 80, 220], 0.95, 0.8, "3 2");
+    appendBBoxLayerSVG(svg, pageExcludedOuterFrames, [230, 40, 160], 1.0, 1.4, "6 2");
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_OTHER_TEXT, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [150, 150, 150], 0.8, 0.5);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_BODY, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [20, 20, 20], 0.9, 0.5);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_FLOAT_TEXT, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [0, 125, 55], 0.9, 0.5);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_CAPTION, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [200, 20, 20], 0.95, 0.7);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_HEADING, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [120, 45, 170], 0.95, 0.7);
+    appendBBoxLayerSVG(svg, pageFigures, [220, 160, 0], 1.0, 1.5);
+
+    svg.push(`</g>`);
+    svg.push(`<g font-family="sans-serif" font-size="10">`);
+    svg.push(`<rect x="${mask.x + 6}" y="${mask.y + 6}" width="230" height="164" fill="white" fill-opacity="0.86" stroke="#ddd"/>`);
+    [
+        ["MASK_SHAPE", [40, 105, 220]],
+        ["MASK_OTHER_TEXT", [210, 210, 210]],
+        ["MASK_BODY", [80, 80, 80]],
+        ["MASK_FLOAT_TEXT", [40, 160, 80]],
+        ["MASK_CAPTION", [220, 55, 45]],
+        ["MASK_HEADING", [155, 80, 185]],
+        ["MASK_CROP", [255, 200, 0]],
+        ["BBOX_SHAPE", [0, 80, 220]],
+        ["BBOX_EXCLUDED_OUTER_FRAME", [230, 40, 160]],
+        ["BBOX_TEXT", [20, 20, 20]],
+        ["BBOX_CROP", [220, 160, 0]]
+    ].forEach(([label, color], i) => {
+        let y = mask.y + 18 + i * 14;
+        svg.push(`<rect x="${mask.x + 14}" y="${y - 8}" width="10" height="10" fill="${colorToSVG(color as [number, number, number])}"/>`);
+        svg.push(`<text x="${mask.x + 30}" y="${y}">${label}</text>`);
+    });
+    svg.push(`</g>`);
+    svg.push(`</svg>`);
+
+    return {
+        page: mask.page,
+        width: mask.width,
+        height: mask.height,
+        cellSize: mask.cellSize,
+        svg: `${svg.join("\n")}\n`
+    };
+}
+
+function emitDebugMasks(
+    options: PDF_ExtractOptions | undefined,
+    pageMetrics: Map<number, PageMetrics>,
+    lines: TextLine[],
+    graphics: PDF_GraphicObject[],
+    figures: FigureCandidate[],
+    bodyFontSize: number,
+    columnWidth: number,
+    bodyLayout: BodyLayoutModel
+) {
+    if (!options?.debugMaskSink) {
+        return;
+    }
+
+    for (let metric of pageMetrics.values()) {
+        let pageRect = {page: metric.page, x: 0, y: 0, width: metric.width, height: metric.height};
+        let mask = buildOccupancyMask(pageRect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
+        for (let figure of figures) {
+            if (figure.node.rect?.page == metric.page) {
+                drawRectOutlineToMask(mask, figure.node.rect, MASK_CROP);
+            }
+        }
+        options.debugMaskSink(occupancyMaskToSVG(mask, metric, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout));
+    }
 }
 
 function expandNarrowFigureToCaptionColumn(rect: PDF_Rect, captionLine: TextLine, columnWidth: number, metric: PageMetrics) {
@@ -2180,7 +2677,7 @@ function fitRectByCaptionSearch(
 ) {
     let rawSearchRect = graphicSearchRect(captionLine, rect, false, columnWidth, metric);
     let searchRect = trimSearchRectAtBlocker(rawSearchRect, lines, bodyFontSize, columnWidth, bodyLayout);
-    let rawGraphicAnchors = graphicAnchorsInRect(searchRect, graphics, metric);
+    let rawGraphicAnchors = graphicAnchorsInRect(searchRect, graphics, metric, [captionLine]);
     let graphicBox = unionAllRects(rawGraphicAnchors);
     let textSearchRect = graphicBox ? expandRect(graphicBox, 18, metric) : searchRect;
     let textAnchors = textAnchorsInRect(searchRect, lines, graphics, bodyFontSize, columnWidth, metric, textSearchRect, bodyLayout);
@@ -2191,7 +2688,7 @@ function fitRectByCaptionSearch(
         return avoidBodyAndEdgeCuts(rect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
     }
 
-    fitted = fitRectToWhitespaceBars(fitted, searchRect, lines, graphics, bodyFontSize, metric);
+    fitted = fitRectToOccupancyWhitespace(fitted, searchRect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
     let finalRect = intersectRects(fitted, searchRect) ?? rect;
     finalRect = padFigureBottomTowardCaption(finalRect, captionLine, bodyFontSize);
     if (
@@ -2415,6 +2912,7 @@ function collectFigureCandidates(
             candidates.push({
                 startIndex: i,
                 endIndex,
+                captionLines: [line],
                 node: new PDF_Node(
                     caption,
                     PDF_NodeType.FIGURE,
@@ -2485,6 +2983,7 @@ function collectFigureCandidates(
         candidates.push({
             startIndex: i,
             endIndex,
+            captionLines: lines.slice(i, endIndex + 1),
             node: new PDF_Node(caption, PDF_NodeType.FIGURE, rect ?? undefined)
         });
     }
@@ -2517,7 +3016,7 @@ function lineCenterHorizontallyInsideRect(line: TextLine, rect: PDF_Rect, margin
 }
 
 // 抽出の中心処理。ページごとの TextItem から、タイトル・見出し・本文・図表を作る。
-export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
+export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, options?: PDF_ExtractOptions) {
     // TextItem をページごとの行へ復元し、文書全体の本文らしいサイズを推定する。
     let lines = pages.flatMap((page, index) => buildLinesForPage(pageItems(page), index + 1));
     let graphics = pages.flatMap((page) => pageGraphics(page));
@@ -2550,6 +3049,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>) {
     let bodyLayout = estimateBodyLayout(lines, bodyFontSize, columnWidth);
     let readingLines = sortLinesForReading(lines);
     let figures = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics, bodyLayout);
+    emitDebugMasks(options, pageMetrics, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout);
     let figureByStart = new Map(figures.map((figure) => [figure.startIndex, figure]));
     let captionLineIndices = new Set<number>();
     let figureRects = figures

@@ -2,6 +2,7 @@
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
+    PDF_DebugMaskDump,
     PDF_Node,
     PDF_NodeType,
     PDF_PageInput,
@@ -37,22 +38,42 @@ interface RenderedPageCanvas {
 const {createCanvas} = require("canvas") as {
     createCanvas: (width: number, height: number) => NodeCanvasLike;
 };
+const fs = require("fs") as {
+    mkdirSync: (path: string, options?: {recursive?: boolean}) => void;
+    writeFileSync: (path: string, data: string) => void;
+};
 const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
-    console.error("usage: node dist/cli.cjs [--html|--json] <pdf-file>");
+    console.error("usage: node dist/cli.cjs [--html|--json] [--debug-mask <dir>] <pdf-file>");
 }
 
 function parseArgs(args: string[]) {
     let mode: OutputMode = "html";
+    let debugMaskDir = "";
     let fileName = "";
 
-    for (let arg of args) {
+    for (let i = 0; i < args.length; i++) {
+        let arg = args[i];
         if (arg == "--html") {
             mode = "html";
         }
         else if (arg == "--json") {
             mode = "json";
+        }
+        else if (arg == "--debug-mask") {
+            debugMaskDir = args[++i] ?? "";
+            if (!debugMaskDir) {
+                usage();
+                return null;
+            }
+        }
+        else if (arg.startsWith("--debug-mask=")) {
+            debugMaskDir = arg.slice("--debug-mask=".length);
+            if (!debugMaskDir) {
+                usage();
+                return null;
+            }
         }
         else if (arg == "-h" || arg == "--help") {
             usage();
@@ -72,7 +93,7 @@ function parseArgs(args: string[]) {
         return null;
     }
 
-    return {mode, fileName};
+    return {mode, fileName, debugMaskDir};
 }
 
 async function renderPageCanvas(page: any) {
@@ -142,7 +163,13 @@ async function attachFigureImages(nodes: PDF_Node[], pageProxies: any[]) {
     }
 }
 
-async function extractPDFFile(fileName: string, renderImages: boolean) {
+function writeDebugMaskDump(dir: string, dump: PDF_DebugMaskDump) {
+    let base = dir.replace(/[\/\\]+$/, "");
+    fs.mkdirSync(base, {recursive: true});
+    fs.writeFileSync(`${base}/page-${String(dump.page).padStart(3, "0")}-mask.svg`, dump.svg);
+}
+
+async function extractPDFFile(fileName: string, renderImages: boolean, debugMaskDir?: string) {
     let loadingTask = pdfjsLib.getDocument({
         url: fileName,
         cMapPacked: true,
@@ -160,7 +187,10 @@ async function extractPDFFile(fileName: string, renderImages: boolean) {
         pageProxies.push(page);
     }
 
-    let nodes = extractNodesFromPages(pages);
+    let nodes = extractNodesFromPages(pages, debugMaskDir
+        ? {debugMaskSink: (dump) => writeDebugMaskDump(debugMaskDir, dump)}
+        : undefined
+    );
     if (renderImages) {
         await attachFigureImages(nodes, pageProxies);
     }
@@ -174,7 +204,7 @@ async function main() {
         return;
     }
 
-    let nodes = await extractPDFFile(options.fileName, options.mode == "html");
+    let nodes = await extractPDFFile(options.fileName, options.mode == "html", options.debugMaskDir);
     if (options.mode == "json") {
         console.log(JSON.stringify(nodes, null, 2));
     }
