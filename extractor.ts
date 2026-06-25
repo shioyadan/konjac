@@ -223,6 +223,7 @@ const MASK_HARD_TEXT_BLOCKER = MASK_BODY_LAYOUT | MASK_CAPTION | MASK_HEADING;
 const MASK_CONTENT = MASK_BODY | MASK_SHAPE | MASK_FLOAT_TEXT | MASK_CAPTION | MASK_HEADING | MASK_OTHER_TEXT | MASK_BODY_LAYOUT;
 
 type DebugScanLog = (message: string) => void;
+type MaskRange = {x0: number; x1: number; y0: number; y1: number};
 
 function multiplyMatrix(a: Matrix, b: Matrix): Matrix {
     return [
@@ -1414,7 +1415,8 @@ function expandTableRectToRules(rect: PDF_Rect, graphics: PDF_GraphicObject[], m
                 usefulGraphicObject(graphic, metric) &&
                 rectsOverlap(graphic, band)
             )
-            .map((graphic) => expandRect(graphic, Math.max(2, graphic.strokeWidth ?? 1), metric))
+            .map((graphic) => intersectRectsLoose(expandRect(graphic, Math.max(2, graphic.strokeWidth ?? 1), metric), band))
+            .filter((rect): rect is PDF_Rect => rect != null)
     );
     if (!ruleBox) {
         return rect;
@@ -1442,18 +1444,13 @@ function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
     return rectArea(graphic) >= 6 || Math.max(graphic.width, graphic.height) >= 10;
 }
 
-function graphicSearchRect(captionLine: TextLine, rect: PDF_Rect, tableCaption: boolean, columnWidth: number, metric: PageMetrics) {
+// bitmap scan が実際の境界を決めるため、ここでは caption の上下関係だけでページ内の安全上限を作る。
+function graphicSearchRect(captionLine: TextLine, tableCaption: boolean, metric: PageMetrics) {
     let pageMargin = 36;
-    let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
-    let crossesColumnSplit = rect.x < columnSplit - 12 && rectRight(rect) > columnSplit + 24;
-    let wide = isWideFigureWidth(rect.width, columnWidth, metric) ||
-        isWideFigureWidth(captionLine.width, columnWidth, metric) ||
-        (!tableCaption && crossesColumnSplit);
-    let x = wide ? metric.minX - 12 : Math.min(rect.x, captionLine.x - columnWidth * 0.3);
-    let right = wide ? metric.maxX + 12 : Math.max(rectRight(rect), captionLine.x + captionLine.width + columnWidth * 0.3);
-    let verticalLimit = Math.max(280, metric.height * 0.42);
+    let x = pageMargin;
+    let right = metric.width - pageMargin;
     let y = tableCaption
-        ? Math.max(pageMargin, captionLine.y - verticalLimit)
+        ? pageMargin
         : captionLine.y + captionLine.fontSize * 0.4;
     let top = tableCaption
         ? captionLine.y - captionLine.fontSize * 0.25
@@ -1461,12 +1458,6 @@ function graphicSearchRect(captionLine: TextLine, rect: PDF_Rect, tableCaption: 
 
     x = clamp(x, pageMargin, metric.width - pageMargin);
     right = clamp(right, x + 24, metric.width - pageMargin);
-    if (!wide && captionLine.x < columnSplit) {
-        right = clamp(Math.min(right, columnSplit + 8), x + 24, metric.width - pageMargin);
-    }
-    else if (!wide) {
-        x = clamp(Math.max(x, columnSplit - 24), pageMargin, right - 24);
-    }
     y = clamp(y, 0, metric.height);
     top = clamp(top, y + 24, metric.height);
     return {page: captionLine.page, x, y, width: right - x, height: top - y};
@@ -1743,7 +1734,7 @@ function fmtRect(rect: PDF_Rect | null) {
     return `p${rect.page} x=${rect.x.toFixed(1)} y=${rect.y.toFixed(1)} w=${rect.width.toFixed(1)} h=${rect.height.toFixed(1)}`;
 }
 
-function maskRangeToRect(mask: OccupancyMask, range: {x0: number; x1: number; y0: number; y1: number}): PDF_Rect {
+function maskRangeToRect(mask: OccupancyMask, range: MaskRange): PDF_Rect {
     return {
         page: mask.page,
         x: mask.x + range.x0 * mask.cellSize,
@@ -1755,7 +1746,7 @@ function maskRangeToRect(mask: OccupancyMask, range: {x0: number; x1: number; y0
 
 function scanVerticalSpanFromCaption(
     mask: OccupancyMask,
-    range: {x0: number; x1: number; y0: number; y1: number},
+    range: MaskRange,
     seedY: number,
     direction: 1 | -1,
     targetBits: number,
@@ -1766,16 +1757,19 @@ function scanVerticalSpanFromCaption(
     let y = clamp(seedY, range.y0, range.y1 - 1);
     let emptyGapLimit = Math.max(2, Math.ceil(gapLimit / mask.cellSize));
     let blockerGapRows = Math.max(2, Math.ceil(blockerGapLimit / mask.cellSize));
+    let separatedGapRows = Math.max(blockerGapRows, Math.ceil(emptyGapLimit * 0.35));
     let structuralBlockerBits = MASK_CAPTION | MASK_HEADING;
     let softContentBits = MASK_SHAPE | MASK_FLOAT_TEXT | MASK_OTHER_TEXT | MASK_BODY;
     let hardBodyRowLimit = Math.max(12, Math.floor((range.x1 - range.x0) * 0.15));
     let structuralRowLimit = Math.max(10, Math.floor((range.x1 - range.x0) * 0.08));
+    let strongResumeTargetLimit = Math.max(12, Math.floor((range.x1 - range.x0) * 0.45));
+    let seedStructuralToleranceRows = Math.max(3, Math.ceil(12 / mask.cellSize));
     let firstContent = -1;
     let lastContent = -1;
     let emptyRows = 0;
 
     // caption 側から外側へ進み、空白帯の先で本文や別 caption に当たったら空白の中間を境界にする。
-    log?.(`vertical: seedY=${seedY} clamped=${y} dir=${direction} rows=${range.y0}..${range.y1 - 1} emptyGapLimit=${emptyGapLimit} blockerGapRows=${blockerGapRows} hardBodyRowLimit=${hardBodyRowLimit} structuralRowLimit=${structuralRowLimit}`);
+    log?.(`vertical: seedY=${seedY} clamped=${y} dir=${direction} rows=${range.y0}..${range.y1 - 1} emptyGapLimit=${emptyGapLimit} blockerGapRows=${blockerGapRows} separatedGapRows=${separatedGapRows} hardBodyRowLimit=${hardBodyRowLimit} structuralRowLimit=${structuralRowLimit}`);
     for (; y >= range.y0 && y < range.y1; y += direction) {
         let structuralBlockerCount = rowBitCount(mask, y, range.x0, range.x1, structuralBlockerBits);
         let hardBodyCount = rowBitCount(mask, y, range.x0, range.x1, MASK_BODY_LAYOUT);
@@ -1786,6 +1780,15 @@ function scanVerticalSpanFromCaption(
             structuralBlockerCount > 0 && (emptyRows >= blockerGapRows || structuralBlockerCount >= structuralRowLimit) ||
             hardBodyCount >= hardBodyRowLimit
         );
+        if (
+            firstContent < 0 &&
+            blocked &&
+            hardBodyCount == 0 &&
+            structuralBlockerCount > 0 &&
+            Math.abs(y - seedY) <= seedStructuralToleranceRows
+        ) {
+            blocked = false;
+        }
         let hasTarget = targetCount > 0;
         let hasSoftContent = softCount > 0 || blockerCount > 0 && !blocked;
 
@@ -1815,7 +1818,12 @@ function scanVerticalSpanFromCaption(
             continue;
         }
 
-        if ((hasTarget || hasSoftContent) && emptyRows >= blockerGapRows) {
+        let currentSpanRows = firstContent < 0 ? 0 : Math.abs(lastContent - firstContent) + 1;
+        let strongInternalResume =
+            emptyRows < separatedGapRows &&
+            currentSpanRows < emptyGapLimit &&
+            targetCount >= strongResumeTargetLimit;
+        if ((hasTarget || hasSoftContent) && emptyRows >= blockerGapRows && !strongInternalResume) {
             log?.(`vertical: y=${y} target=${targetCount} soft=${softCount} emptyRows=${emptyRows} -> stop before separated content`);
             return spanRangeFromRowsToBlocker(range, firstContent, lastContent, y, direction);
         }
@@ -1837,13 +1845,27 @@ function scanVerticalSpanFromCaption(
     return firstContent < 0 ? null : spanRangeFromRows(range, firstContent, lastContent);
 }
 
-function spanRangeFromRows(range: {x0: number; x1: number; y0: number; y1: number}, a: number, b: number) {
+function seedVerticalScanRange(mask: OccupancyMask, range: MaskRange, seedX: number, bodyFontSize: number, columnWidth: number, log?: DebugScanLog) {
+    let rangeWidth = range.x1 - range.x0;
+    let minFigureWidth = Math.max(160, Math.min(columnWidth * 0.85, bodyFontSize * 18.0));
+    let bandWidth = Math.min(rangeWidth, Math.max(4, Math.ceil(minFigureWidth / mask.cellSize)));
+    let centerX = clamp(Math.floor((seedX - mask.x) / mask.cellSize), range.x0, range.x1 - 1);
+    let x0 = clamp(centerX - Math.floor(bandWidth / 2), range.x0, range.x1 - bandWidth);
+
+    // 縦方向の blocker 判定は、caption 直上/直下の最低幅だけを見る。
+    // 反対カラムの本文で止まることを避け、実際の図幅は後続の左右スキャンで bitmap から決める。
+    let seedRange = {...range, x0, x1: x0 + bandWidth};
+    log?.(`scan: seed vertical band x=${seedRange.x0}..${seedRange.x1 - 1} minWidth=${minFigureWidth.toFixed(1)}`);
+    return seedRange;
+}
+
+function spanRangeFromRows(range: MaskRange, a: number, b: number) {
     let y0 = Math.max(range.y0, Math.min(a, b));
     let y1 = Math.min(range.y1, Math.max(a, b) + 1);
     return {...range, y0, y1};
 }
 
-function spanRangeFromRowsToBlocker(range: {x0: number; x1: number; y0: number; y1: number}, first: number, last: number, blocker: number, direction: 1 | -1) {
+function spanRangeFromRowsToBlocker(range: MaskRange, first: number, last: number, blocker: number, direction: 1 | -1) {
     let span = spanRangeFromRows(range, first, last);
     if (direction > 0) {
         let y1 = clamp(Math.ceil((Math.max(first, last) + blocker + 1) / 2), span.y1, range.y1);
@@ -1854,7 +1876,7 @@ function spanRangeFromRowsToBlocker(range: {x0: number; x1: number; y0: number; 
     return {...span, y0};
 }
 
-function targetColumnSpan(mask: OccupancyMask, range: {x0: number; x1: number; y0: number; y1: number}, bits: number) {
+function targetColumnSpan(mask: OccupancyMask, range: MaskRange, bits: number) {
     let minX = range.x1;
     let maxX = range.x0 - 1;
     for (let y = range.y0; y < range.y1; y++) {
@@ -1872,7 +1894,7 @@ function targetColumnSpan(mask: OccupancyMask, range: {x0: number; x1: number; y
 
 function findSeedTargetCell(
     mask: OccupancyMask,
-    range: {x0: number; x1: number; y0: number; y1: number},
+    range: MaskRange,
     seedX: number,
     seedY: number,
     direction: 1 | -1,
@@ -1915,7 +1937,7 @@ function findSeedTargetCell(
 
 function scanTargetColumnSpanFromSeed(
     mask: OccupancyMask,
-    range: {x0: number; x1: number; y0: number; y1: number},
+    range: MaskRange,
     seedX: number,
     seedY: number,
     direction: 1 | -1,
@@ -1931,18 +1953,12 @@ function scanTargetColumnSpanFromSeed(
     }
 
     let seedCell = seed;
-    let emptyBand = Math.max(2, Math.ceil(Math.max(6, mask.cellSize * 2) / mask.cellSize));
-    let backRows = Math.max(3, Math.ceil(Math.max(8, bodyFontSize * 1.0) / mask.cellSize));
-    let forwardRows = Math.max(12, Math.ceil(Math.max(56, bodyFontSize * 5.5) / mask.cellSize));
-    let supportY0 = direction > 0
-        ? clamp(seedCell.y - backRows, range.y0, range.y1)
-        : clamp(seedCell.y - forwardRows, range.y0, range.y1);
-    let supportY1 = direction > 0
-        ? clamp(seedCell.y + forwardRows + 1, supportY0 + 1, range.y1)
-        : clamp(seedCell.y + backRows + 1, supportY0 + 1, range.y1);
+    let emptyBand = Math.max(4, Math.ceil(Math.max(16, bodyFontSize * 1.6) / mask.cellSize));
+    let supportY0 = range.y0;
+    let supportY1 = range.y1;
 
-    // seed 周辺の高さ帯で左右へ伸ばし、同じ高さの別図や本文を global に巻き込まない。
-    // 連結成分は使わず、caption から見た水平方向のスキャンだけで横幅を決める。
+    // 縦スキャンで得た高さ全体を使って seed から左右へ伸ばす。
+    // searchRect 全幅の min/max ではなく、caption 近傍から到達できる bitmap 上の owner span を取る。
     function scanEdge(step: -1 | 1) {
         let lastContent = seedCell.x;
         let emptyRun = 0;
@@ -2035,6 +2051,7 @@ function scanRectFromCaptionWhitespace(
     direction: 1 | -1,
     targetBits: number,
     bodyFontSize: number,
+    columnWidth: number,
     verticalGapLimit: number,
     log?: DebugScanLog
 ) {
@@ -2046,11 +2063,13 @@ function scanRectFromCaptionWhitespace(
 
     log?.(`scan: start search=${fmtRect(searchRect)} cellRange x=${range.x0}..${range.x1 - 1} y=${range.y0}..${range.y1 - 1}`);
     let blockerGapLimit = Math.max(5, bodyFontSize * 0.6);
-    let vertical = scanVerticalSpanFromCaption(mask, range, seedY, direction, targetBits, blockerGapLimit, verticalGapLimit, log);
-    if (!vertical) {
+    let seedRange = seedVerticalScanRange(mask, range, seedX, bodyFontSize, columnWidth, log);
+    let seedVertical = scanVerticalSpanFromCaption(mask, seedRange, seedY, direction, targetBits, blockerGapLimit, verticalGapLimit, log);
+    if (!seedVertical) {
         log?.("scan: no vertical span");
         return null;
     }
+    let vertical = {...range, y0: seedVertical.y0, y1: seedVertical.y1};
     log?.(`scan: vertical span x=${vertical.x0}..${vertical.x1 - 1} y=${vertical.y0}..${vertical.y1 - 1}`);
 
     let scanBits = targetBits | MASK_OTHER_TEXT;
@@ -2066,11 +2085,19 @@ function scanRectFromCaptionWhitespace(
         searchRect.width >= 360 &&
         globalWidth >= (range.x1 - range.x0) * 0.65 &&
         (seedRatio < 0.38 || seedRatio > 0.62);
-    if (wideAmbiguousTarget) {
+    let ownerSpanNeeded =
+        wideAmbiguousTarget ||
+        direction < 0 && (
+            globalWidth >= (range.x1 - range.x0) * 0.6 ||
+            globalWidth * mask.cellSize >= columnWidth * 1.25
+        );
+    let ownerSpanUsed = false;
+    if (ownerSpanNeeded) {
         let seededSpan = scanTargetColumnSpanFromSeed(mask, vertical, seedX, seedY, direction, targetBits, scanBits, bodyFontSize, log);
         if (seededSpan) {
-            log?.(`scan: replace global target columns x=${xSpan.x0}..${xSpan.x1 - 1} with seeded x=${seededSpan.x0}..${seededSpan.x1 - 1}`);
+            log?.(`scan: replace global target columns x=${xSpan.x0}..${xSpan.x1 - 1} with owner x=${seededSpan.x0}..${seededSpan.x1 - 1}`);
             xSpan = seededSpan;
+            ownerSpanUsed = true;
         }
     }
     log?.(`scan: target columns x=${xSpan.x0}..${xSpan.x1 - 1}`);
@@ -2079,6 +2106,9 @@ function scanRectFromCaptionWhitespace(
     // 図内の列間・パネル間の細い縦空白で切らないよう、外側境界とみなす空白帯は広めに要求する。
     // 本文などの hard blocker に当たった場合は、この幅を満たさなくても手前で止まる。
     let minBand = Math.max(2, Math.ceil(Math.max(40, Math.min(searchRect.width, 280) * 0.16, bodyFontSize * 4.0) / mask.cellSize));
+    if (ownerSpanUsed) {
+        minBand = Math.min(minBand, Math.max(4, Math.ceil(Math.max(16, bodyFontSize * 1.6) / mask.cellSize)));
+    }
     log?.(`scan: horizontal padding=${padding} minBand=${minBand}`);
     let x0 = whitespaceOrBlockerIndex(mask, xSpan.x0, vertical.x0, vertical.y0, vertical.y1, padding, minBand, -1, log);
     let x1 = whitespaceOrBlockerIndex(mask, xSpan.x1, vertical.x1, vertical.y0, vertical.y1, padding, minBand, 1, log);
@@ -2375,7 +2405,7 @@ function fitTableRectByBitmap(
 ) {
     let captionLine = captionLines[0];
     let captionEndLine = captionLines[captionLines.length - 1] ?? captionLine;
-    let rawSearchRect = graphicSearchRect(captionLine, anchorRect, true, columnWidth, metric);
+    let rawSearchRect = graphicSearchRect(captionLine, true, metric);
     let captionBottom = captionEndLine.y - captionEndLine.fontSize * 0.3;
     let searchTop = clamp(captionBottom, rawSearchRect.y + 24, rectTop(rawSearchRect));
     let searchRect = {...rawSearchRect, height: searchTop - rawSearchRect.y};
@@ -2389,6 +2419,7 @@ function fitTableRectByBitmap(
         -1,
         MASK_SHAPE | MASK_FLOAT_TEXT,
         bodyFontSize,
+        columnWidth,
         Math.max(bodyFontSize * 2.8, 26),
         log
     );
@@ -2420,7 +2451,7 @@ function fitRectByCaptionSearch(
     metric: PageMetrics,
     log?: DebugScanLog
 ) {
-    let rawSearchRect = graphicSearchRect(captionLine, anchorRect, false, columnWidth, metric);
+    let rawSearchRect = graphicSearchRect(captionLine, false, metric);
     log?.(`figure: raw search ${fmtRect(rawSearchRect)}`);
     let searchRect = rawSearchRect;
     log?.(`figure: scan search ${fmtRect(searchRect)}`);
@@ -2434,6 +2465,7 @@ function fitRectByCaptionSearch(
         1,
         MASK_SHAPE | MASK_FLOAT_TEXT,
         bodyFontSize,
+        columnWidth,
         Math.max(bodyFontSize * 7.0, 64),
         log
     );
