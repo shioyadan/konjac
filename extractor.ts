@@ -78,6 +78,10 @@ export class PDF_Node {
     }
 };
 
+const FIGURE_DISPLAY_SCALE = 2.25;
+const FIGURE_DISPLAY_MIN_WIDTH = 400;
+const FIGURE_DISPLAY_MAX_WIDTH = 840;
+
 // PDF.js の TextItem のうち、この抽出器が使うフィールドだけを表す型。
 export interface PDF_TextItemLike {
     // PDF.js が抽出した文字列。
@@ -2929,12 +2933,25 @@ export function nodeToHTMLElementName(node: PDF_Node) {
     }
 }
 
+// 切り出し PNG のピクセル数ではなく、PDF 上の bbox 幅を基準に HTML 表示幅を決める。
+// 同じ倍率を使いながら上下限を置くことで、細い図の過剰な縮小と大きい図の過剰な拡大を避ける。
+export function figureImageDisplayWidth(rect?: PDF_Rect) {
+    if (!rect) {
+        return "";
+    }
+
+    let width = clamp(rect.width * FIGURE_DISPLAY_SCALE, FIGURE_DISPLAY_MIN_WIDTH, FIGURE_DISPLAY_MAX_WIDTH);
+    return `${Math.round(width)}px`;
+}
+
 // CLI 出力用の最小 HTML を生成する。
 export function nodesToHTML(nodes: PDF_Node[]) {
     let body = nodes.map((node) => {
         if (node.type == PDF_NodeType.FIGURE) {
+            let imageWidth = figureImageDisplayWidth(node.rect);
+            let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
             let image = node.imageSrc
-                ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}">`
+                ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
                 : "";
             return `<figure>${image}<figcaption>${escapeHTML(node.str)}</figcaption></figure>`;
         }
@@ -2951,7 +2968,7 @@ export function nodesToHTML(nodes: PDF_Node[]) {
     <style>
         main { max-width: 760px; margin: 0 auto; line-height: 1.55; }
         figure { margin: 1.5rem 0; }
-        figure img { display: block; max-width: 88%; height: auto; margin: 0 auto 0.5rem; }
+        figure img { display: block; max-width: 100%; height: auto; margin: 0 auto 0.5rem; }
         figcaption { font-size: 0.92rem; color: #333; text-align: center; }
     </style>
 </head>

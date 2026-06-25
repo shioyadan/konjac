@@ -9,6 +9,7 @@ import {
     PDF_Rect,
     extractNodesFromPages,
     extractPageInputFromPDFPage,
+    figureImageDisplayWidth,
     nodeToHTMLElementName
 } from "./extractor";
 
@@ -114,12 +115,14 @@ function show(nodes: PDF_Node[]) {
     for (let node of nodes) {
         if (node.type == PDF_NodeType.FIGURE) {
             let figure = document.createElement("figure");
+            figure.style.margin = "1.5rem 0";
             if (node.imageSrc) {
                 let image = document.createElement("img");
                 image.src = node.imageSrc;
                 image.alt = node.str;
                 image.style.display = "block";
-                image.style.maxWidth = "88%";
+                image.style.width = figureImageDisplayWidth(node.rect);
+                image.style.maxWidth = "100%";
                 image.style.height = "auto";
                 image.style.margin = "0 auto 0.5rem";
                 figure.appendChild(image);
