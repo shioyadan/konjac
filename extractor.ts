@@ -1633,7 +1633,6 @@ function drawRectOutlineToMask(mask: OccupancyMask, rect: PDF_Rect, bits: number
 
 function lineOccupancyBits(
     line: TextLine,
-    lines: TextLine[],
     graphics: PDF_GraphicObject[],
     bodyFontSize: number,
     columnWidth: number,
@@ -1696,7 +1695,7 @@ function paintOccupancyMask(
             drawRectToMask(
                 mask,
                 lineRect(line),
-                lineOccupancyBits(line, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout)
+                lineOccupancyBits(line, graphics, bodyFontSize, columnWidth, metric, bodyLayout)
             );
         }
     }
@@ -1871,6 +1870,97 @@ function targetColumnSpan(mask: OccupancyMask, range: {x0: number; x1: number; y
     return maxX < minX ? null : {x0: minX, x1: maxX + 1};
 }
 
+function findSeedTargetCell(
+    mask: OccupancyMask,
+    range: {x0: number; x1: number; y0: number; y1: number},
+    seedX: number,
+    seedY: number,
+    direction: 1 | -1,
+    bits: number
+) {
+    let centerX = clamp(Math.floor((seedX - mask.x) / mask.cellSize), range.x0, range.x1 - 1);
+    let yStart = clamp(seedY, range.y0, range.y1 - 1);
+    let radiusLimit = Math.max(3, Math.ceil(24 / mask.cellSize));
+
+    // caption 中央から図表方向へ伸ばした縦線近傍で、最初に触れる図表セルを seed にする。
+    for (let y = yStart; y >= range.y0 && y < range.y1; y += direction) {
+        for (let r = 0; r <= radiusLimit; r++) {
+            let xs = r == 0 ? [centerX] : [centerX - r, centerX + r];
+            for (let x of xs) {
+                if (x >= range.x0 && x < range.x1 && (mask.cells[y * mask.width + x] & bits) != 0) {
+                    return {x, y};
+                }
+            }
+        }
+    }
+
+    let best: {x: number; y: number; score: number} | null = null;
+    for (let y = range.y0; y < range.y1; y++) {
+        let offset = y * mask.width;
+        for (let x = range.x0; x < range.x1; x++) {
+            if ((mask.cells[offset + x] & bits) == 0) {
+                continue;
+            }
+            let score = Math.abs(x - centerX) * 2 + Math.abs(y - yStart);
+            if (!best || score < best.score) {
+                best = {x, y, score};
+            }
+        }
+    }
+
+    return best ? {x: best.x, y: best.y} : null;
+}
+
+function seededTargetColumnSpan(
+    mask: OccupancyMask,
+    range: {x0: number; x1: number; y0: number; y1: number},
+    seedX: number,
+    seedY: number,
+    direction: 1 | -1,
+    seedBits: number,
+    scanBits: number,
+    log?: DebugScanLog
+) {
+    let seed = findSeedTargetCell(mask, range, seedX, seedY, direction, seedBits);
+    if (!seed) {
+        log?.("scan: no seed target cell");
+        return null;
+    }
+
+    let seedCell = seed;
+    let emptyBand = Math.max(2, Math.ceil(Math.max(6, mask.cellSize * 2) / mask.cellSize));
+
+    function scanEdge(step: -1 | 1) {
+        let lastContent = seedCell.x;
+        let emptyRun = 0;
+
+        for (let x = seedCell.x; x >= range.x0 && x < range.x1; x += step) {
+            if (columnBitCount(mask, x, range.y0, range.y1, scanBits) > 0) {
+                lastContent = x;
+                emptyRun = 0;
+                continue;
+            }
+
+            if (x != seedCell.x && columnBitCount(mask, x, range.y0, range.y1, MASK_HARD_TEXT_BLOCKER) > 0) {
+                log?.(`scan: seed ${step < 0 ? "left" : "right"} stopped by blocker x=${x}`);
+                break;
+            }
+
+            if (++emptyRun >= emptyBand) {
+                log?.(`scan: seed ${step < 0 ? "left" : "right"} stopped by whitespace x=${x - (emptyBand - 1) * step}..${x}`);
+                break;
+            }
+        }
+
+        return step < 0 ? lastContent : lastContent + 1;
+    }
+
+    let x0 = scanEdge(-1);
+    let x1 = scanEdge(1);
+    log?.(`scan: seed target cell x=${seedCell.x} y=${seedCell.y} scanned x=${x0}..${x1 - 1}`);
+    return {x0, x1};
+}
+
 function lowerWhitespaceOrBlockerIndex(
     mask: OccupancyMask,
     edge: number,
@@ -1949,10 +2039,12 @@ function scanRectFromCaptionWhitespace(
     mask: OccupancyMask,
     searchRect: PDF_Rect,
     seedY: number,
+    seedX: number,
     direction: 1 | -1,
     targetBits: number,
     bodyFontSize: number,
     verticalGapLimit: number,
+    allowNarrowSeedSpan: boolean,
     log?: DebugScanLog
 ) {
     let range = maskRectRange(mask, searchRect);
@@ -1970,11 +2062,29 @@ function scanRectFromCaptionWhitespace(
     }
     log?.(`scan: vertical span x=${vertical.x0}..${vertical.x1 - 1} y=${vertical.y0}..${vertical.y1 - 1}`);
 
-    // 縦範囲が決まった後、その中の図表候補から左右の垂直空白帯まで広げる。
-    let xSpan = targetColumnSpan(mask, vertical, targetBits | MASK_OTHER_TEXT);
+    let scanBits = targetBits | MASK_OTHER_TEXT;
+    let xSpan = targetColumnSpan(mask, vertical, scanBits);
     if (!xSpan) {
         log?.("scan: no target columns inside vertical span");
         return null;
+    }
+    let seedRatio = (seedX - searchRect.x) / searchRect.width;
+    let globalWidth = xSpan.x1 - xSpan.x0;
+    let wideAmbiguousTarget =
+        direction > 0 &&
+        searchRect.width >= 360 &&
+        globalWidth >= (range.x1 - range.x0) * 0.65 &&
+        (seedRatio < 0.38 || seedRatio > 0.62);
+    if (wideAmbiguousTarget) {
+        let seededSpan = seededTargetColumnSpan(mask, vertical, seedX, seedY, direction, targetBits, scanBits, log);
+        let seededWidth = seededSpan ? seededSpan.x1 - seededSpan.x0 : 0;
+        if (seededSpan && (allowNarrowSeedSpan || seededWidth >= globalWidth * 0.65)) {
+            log?.(`scan: replace global target columns x=${xSpan.x0}..${xSpan.x1 - 1} with seeded x=${seededSpan.x0}..${seededSpan.x1 - 1}`);
+            xSpan = seededSpan;
+        }
+        else if (seededSpan) {
+            log?.(`scan: keep global target columns because seeded span is narrow x=${seededSpan.x0}..${seededSpan.x1 - 1}`);
+        }
     }
     log?.(`scan: target columns x=${xSpan.x0}..${xSpan.x1 - 1}`);
 
@@ -2120,7 +2230,7 @@ function lineRectsByMaskBit(
     return lines
         .filter((line) =>
             line.page == metric.page &&
-            (lineOccupancyBits(line, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout) & bit) != 0
+            (lineOccupancyBits(line, graphics, bodyFontSize, columnWidth, metric, bodyLayout) & bit) != 0
         )
         .map(lineRect);
 }
@@ -2287,14 +2397,17 @@ function fitTableRectByBitmap(
     let searchTop = clamp(captionBottom, rawSearchRect.y + 24, rectTop(rawSearchRect));
     let searchRect = {...rawSearchRect, height: searchTop - rawSearchRect.y};
     let seedY = Math.floor((captionBottom - pageMask.y) / pageMask.cellSize) - 1;
+    let seedX = captionLine.x + captionLine.width / 2;
     let fitted = scanRectFromCaptionWhitespace(
         pageMask,
         searchRect,
         seedY,
+        seedX,
         -1,
         MASK_SHAPE | MASK_FLOAT_TEXT,
         bodyFontSize,
         Math.max(bodyFontSize * 2.8, 26),
+        false,
         log
     );
 
@@ -2323,6 +2436,7 @@ function fitRectByCaptionSearch(
     bodyFontSize: number,
     columnWidth: number,
     metric: PageMetrics,
+    allowNarrowSeedSpan: boolean,
     log?: DebugScanLog
 ) {
     let rawSearchRect = graphicSearchRect(captionLine, anchorRect, false, columnWidth, metric);
@@ -2330,14 +2444,17 @@ function fitRectByCaptionSearch(
     let searchRect = rawSearchRect;
     log?.(`figure: scan search ${fmtRect(searchRect)}`);
     let seedY = Math.ceil((figureCaptionClearY(captionLine) - pageMask.y) / pageMask.cellSize);
+    let seedX = captionLine.x + captionLine.width / 2;
     let fitted = scanRectFromCaptionWhitespace(
         pageMask,
         searchRect,
         seedY,
+        seedX,
         1,
         MASK_SHAPE | MASK_FLOAT_TEXT,
         bodyFontSize,
         Math.max(bodyFontSize * 7.0, 64),
+        allowNarrowSeedSpan,
         log
     );
 
@@ -2354,9 +2471,56 @@ function fitRectByCaptionSearch(
     return finalRect;
 }
 
+function hasSideBySideFigureCaption(
+    lines: TextLine[],
+    captionLine: TextLine,
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    let captionCenter = captionLine.x + captionLine.width / 2;
+    let yTolerance = Math.max(10, bodyFontSize * 1.2);
+
+    // 同じ高さ付近の別 Figure キャプションが離れた位置にあれば、左右に並ぶ別図として分離する。
+    return lines.some((line) =>
+        line != captionLine &&
+        line.page == captionLine.page &&
+        Math.abs(line.y - captionLine.y) <= yTolerance &&
+        Math.abs(line.x + line.width / 2 - captionCenter) >= columnWidth * 0.65 &&
+        isCaptionLine(line, bodyFontSize, columnWidth) &&
+        !isTableCaption(line.text) &&
+        !isAlgorithmCaptionLine(line)
+    );
+}
+
 // Figure が縦に続くページでは、現在の Figure の上側候補に直前 Figure のキャプションが入ることがある。
 // 候補内に別のキャプションを見つけたら、その直下で上端を切り、前の図を巻き込まないようにする。
-function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], bodyFontSize: number, columnWidth: number, log?: DebugScanLog) {
+function findSeparatorBelowCaption(rect: PDF_Rect, mask: OccupancyMask, searchTop: number, bodyFontSize: number, log?: DebugScanLog) {
+    let depth = Math.max(36, bodyFontSize * 5);
+    let searchRect = {
+        page: rect.page,
+        x: rect.x,
+        y: Math.max(rect.y, searchTop - depth),
+        width: rect.width,
+        height: Math.min(depth, searchTop - rect.y)
+    };
+    let range = maskRectRange(mask, searchRect);
+    if (!range) {
+        return null;
+    }
+
+    let minShape = Math.max(12, Math.floor((range.x1 - range.x0) * 0.7));
+    for (let y = range.y1 - 1; y >= range.y0; y--) {
+        if (rowBitCount(mask, y, range.x0, range.x1, MASK_SHAPE) >= minShape) {
+            let top = mask.y + y * mask.cellSize - Math.max(2, bodyFontSize * 0.3);
+            log?.(`figure: previous caption separator y=${(mask.y + y * mask.cellSize).toFixed(1)} -> top=${top.toFixed(1)}`);
+            return top;
+        }
+    }
+
+    return null;
+}
+
+function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], mask: OccupancyMask, bodyFontSize: number, columnWidth: number, log?: DebugScanLog) {
     let top = rect.y + rect.height;
     let topTolerance = Math.max(2, bodyFontSize * 0.4);
     let previousCaption = lines
@@ -2372,9 +2536,10 @@ function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], body
     if (!previousCaption) {
         return rect;
     }
-    log?.(`figure: previous caption trim anchor y=${previousCaption.y.toFixed(1)} text="${previousCaption.text}"`);
+    log?.(`figure: previous caption trim anchor y=${previousCaption.y.toFixed(1)} font=${previousCaption.fontSize.toFixed(1)} width=${previousCaption.width.toFixed(1)} rectWidth=${rect.width.toFixed(1)} text="${previousCaption.text}"`);
 
-    let captionBottom = previousCaption.y;
+    let captionBaselineBottom = previousCaption.y;
+    let captionBoxBottom = lineRect(previousCaption).y;
     let prevLine = previousCaption;
     let captionText = previousCaption.text;
     let possibleContinuationLines = lines
@@ -2404,16 +2569,26 @@ function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], body
 
         log?.(`figure: previous caption continuation y=${line.y.toFixed(1)} text="${line.text}"`);
         captionText = appendLineText(captionText, line.text);
-        captionBottom = line.y;
+        captionBaselineBottom = line.y;
+        captionBoxBottom = Math.min(captionBoxBottom, lineRect(line).y);
         prevLine = line;
     }
 
-    // 複数行キャプションの続きも落とすため、キャプションブロックの少し下まで余白を取る。
-    let trimmedTop = clamp(
-        captionBottom - Math.max(bodyFontSize * 0.8, 8),
-        rect.y + 24,
-        top
-    );
+    // 太字 caption は PDF.js の y より下へ描画されることがあるため、bbox 下端から余白を取る。
+    let deepCaption = top - previousCaption.y > Math.max(40, bodyFontSize * 5.0);
+    let fallbackTop = deepCaption
+        ? captionBoxBottom - Math.max(bodyFontSize * 1.8, previousCaption.fontSize * 1.4, 16)
+        : captionBaselineBottom - Math.max(bodyFontSize * 0.8, 8);
+    let separatorTop = deepCaption
+        ? findSeparatorBelowCaption(
+            rect,
+            mask,
+            captionBoxBottom - Math.max(bodyFontSize * 5.0, previousCaption.fontSize * 4.0, 40),
+            bodyFontSize,
+            log
+        )
+        : null;
+    let trimmedTop = clamp(separatorTop == null ? fallbackTop : Math.min(fallbackTop, separatorTop), rect.y + 24, top);
     log?.(`figure: previous caption trim top ${top.toFixed(1)} -> ${trimmedTop.toFixed(1)}`);
 
     return {
@@ -2600,10 +2775,14 @@ function collectFigureCandidates(
         else if (anchorRect) {
             scanLog?.(`caption: "${caption}"`);
             scanLog?.(`figure: anchor ${fmtRect(anchorRect)}`);
-            rect = fitRectByCaptionSearch(anchorRect, line, pageMask, bodyFontSize, columnWidth, metric, scanLog);
+            let sideBySideCaption = hasSideBySideFigureCaption(lines, line, bodyFontSize, columnWidth);
+            if (sideBySideCaption) {
+                scanLog?.("figure: side-by-side caption -> allow narrow seed span");
+            }
+            rect = fitRectByCaptionSearch(anchorRect, line, pageMask, bodyFontSize, columnWidth, metric, sideBySideCaption, scanLog);
             scanLog?.(`figure: after bitmap scan ${fmtRect(rect)}`);
             if (rect) {
-                rect = trimFigureRectAtPreviousCaption(rect, lines, bodyFontSize, columnWidth, scanLog);
+                rect = trimFigureRectAtPreviousCaption(rect, lines, pageMask, bodyFontSize, columnWidth, scanLog);
                 scanLog?.(`figure: after final previous-caption trim ${fmtRect(rect)}`);
                 rect = padFigureBottomTowardCaption(rect, line, bodyFontSize);
                 scanLog?.(`figure: after caption padding ${fmtRect(rect)}`);
