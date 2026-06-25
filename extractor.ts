@@ -2101,7 +2101,9 @@ function scanLoggerForCaption(options: PDF_ExtractOptions | undefined, caption: 
     return (message) => options.debugScanSink?.(`[scan] ${message}`);
 }
 
-function trimFigureSideIntrusionAtColumnGap(
+// Figure の横幅は caption/seed が属するカラムを優先する。
+// bitmap が隣のカラムや枠全体まで広がった場合は、空白帯・本文 blocker・ページ中央で所有範囲へ戻す。
+function fitFigureToCaptionHorizontalOwner(
     rect: PDF_Rect,
     seedRect: PDF_Rect,
     captionLine: TextLine,
@@ -2117,6 +2119,7 @@ function trimFigureSideIntrusionAtColumnGap(
 
     let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
     let captionCenter = captionLine.x + captionLine.width / 2;
+    let ownedRect = rect;
     let padding = Math.max(1, Math.ceil(Math.max(2, bodyFontSize * 0.25) / mask.cellSize));
     let minBand = Math.max(2, Math.ceil(Math.max(3, bodyFontSize * 0.35) / mask.cellSize));
 
@@ -2126,21 +2129,36 @@ function trimFigureSideIntrusionAtColumnGap(
         let newX = mask.x + x0 * mask.cellSize;
         if (newX > rect.x + mask.cellSize) {
             log?.(`figure: trimmed left intrusion x=${rect.x.toFixed(1)} -> ${newX.toFixed(1)}`);
-            return {...rect, x: newX, width: rectRight(rect) - newX};
+            ownedRect = {...rect, x: newX, width: rectRight(rect) - newX};
         }
     }
 
-    if (captionCenter < columnSplit - 12 && rectRight(seedRect) < rectRight(rect) - minBand * mask.cellSize) {
+    if (captionCenter < columnSplit - 12 && rectRight(seedRect) < rectRight(ownedRect) - minBand * mask.cellSize) {
         let ownedRight = clamp(Math.ceil((rectRight(seedRect) - mask.x) / mask.cellSize), range.x0 + 1, range.x1 - 1);
         let x1 = whitespaceOrBlockerIndex(mask, ownedRight, range.x1, range.y0, range.y1, padding, minBand, 1, log);
         let newRight = mask.x + x1 * mask.cellSize;
-        if (newRight < rectRight(rect) - mask.cellSize) {
-            log?.(`figure: trimmed right intrusion right=${rectRight(rect).toFixed(1)} -> ${newRight.toFixed(1)}`);
-            return {...rect, width: newRight - rect.x};
+        if (newRight < rectRight(ownedRect) - mask.cellSize) {
+            log?.(`figure: trimmed right intrusion right=${rectRight(ownedRect).toFixed(1)} -> ${newRight.toFixed(1)}`);
+            ownedRect = {...ownedRect, width: newRight - ownedRect.x};
         }
     }
 
-    return rect;
+    if (ownedRect.width > metric.width * 0.75) {
+        return ownedRect;
+    }
+
+    let pageCenter = metric.width / 2;
+    if (captionCenter < pageCenter - 40 && rectRight(ownedRect) > pageCenter + 8) {
+        let right = pageCenter + 8;
+        return {...ownedRect, width: right - ownedRect.x};
+    }
+
+    if (captionCenter > pageCenter + 40 && ownedRect.x < pageCenter - 24) {
+        let x = pageCenter - 24;
+        return {...ownedRect, x, width: rectRight(ownedRect) - x};
+    }
+
+    return ownedRect;
 }
 
 function columnMostlyEmpty(mask: OccupancyMask, x: number, y0: number, y1: number) {
@@ -2346,28 +2364,6 @@ function padFigureBottomTowardCaption(rect: PDF_Rect, captionLine: TextLine, bod
     return {...rect, y, height: rectTop(rect) - y};
 }
 
-function clampFigureToCaptionHalf(rect: PDF_Rect, captionLine: TextLine, metric: PageMetrics) {
-    let center = metric.width / 2;
-    let captionCenter = captionLine.x + captionLine.width / 2;
-    let sideMargin = 40;
-
-    if (rect.width > metric.width * 0.75) {
-        return rect;
-    }
-
-    if (captionCenter < center - sideMargin && rectRight(rect) > center + 8) {
-        let right = center + 8;
-        return {...rect, width: right - rect.x};
-    }
-
-    if (captionCenter > center + sideMargin && rect.x < center - 24) {
-        let x = center - 24;
-        return {...rect, x, width: rectRight(rect) - x};
-    }
-
-    return rect;
-}
-
 function fitTableRectByBitmap(
     anchorRect: PDF_Rect,
     captionLines: TextLine[],
@@ -2450,7 +2446,7 @@ function fitRectByCaptionSearch(
     if (!finalRect) {
         return null;
     }
-    finalRect = trimFigureSideIntrusionAtColumnGap(finalRect, anchorRect, captionLine, pageMask, bodyFontSize, metric, log);
+    finalRect = fitFigureToCaptionHorizontalOwner(finalRect, anchorRect, captionLine, pageMask, bodyFontSize, metric, log);
     return finalRect;
 }
 
@@ -2747,7 +2743,6 @@ function collectFigureCandidates(
                 scanLog?.(`figure: after final previous-caption trim ${fmtRect(rect)}`);
                 rect = padFigureBottomTowardCaption(rect, line, bodyFontSize);
                 scanLog?.(`figure: after caption padding ${fmtRect(rect)}`);
-                rect = clampFigureToCaptionHalf(rect, line, metric);
                 scanLog?.(`figure: final ${fmtRect(rect)}`);
             }
         }
