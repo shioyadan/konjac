@@ -1950,7 +1950,7 @@ function scanTargetColumnSpanFromSeed(
     return {x0, x1};
 }
 
-function lowerWhitespaceOrBlockerIndex(
+function whitespaceOrBlockerIndex(
     mask: OccupancyMask,
     edge: number,
     limit: number,
@@ -1958,70 +1958,49 @@ function lowerWhitespaceOrBlockerIndex(
     y1: number,
     padding: number,
     minBand: number,
-    log?: DebugScanLog
-) {
-    let blockerBits = MASK_HARD_TEXT_BLOCKER;
-    let runEnd = -1;
-    for (let x = edge - 1; x >= limit; x--) {
-        if (columnBitCount(mask, x, y0, y1, blockerBits) > 0) {
-            log?.(`horizontal-left: blocker at x=${x}, boundary=${Math.min(edge, x + 1)}`);
-            return Math.min(edge, x + 1);
-        }
-
-        if (!columnMostlyEmpty(mask, x, y0, y1)) {
-            runEnd = -1;
-            continue;
-        }
-
-        if (runEnd < 0) {
-            runEnd = x;
-        }
-        if (runEnd - x + 1 >= minBand) {
-            let boundary = clamp(runEnd + 1 - padding, x + Math.ceil(minBand * 0.35), runEnd + 1);
-            log?.(`horizontal-left: whitespace band x=${x}..${runEnd}, boundary=${boundary}`);
-            return boundary;
-        }
-    }
-
-    log?.(`horizontal-left: reached limit=${limit}, boundary=${Math.max(limit, edge - padding)}`);
-    return Math.max(limit, edge - padding);
-}
-
-function upperWhitespaceOrBlockerIndex(
-    mask: OccupancyMask,
-    edge: number,
-    limit: number,
-    y0: number,
-    y1: number,
-    padding: number,
-    minBand: number,
+    step: -1 | 1,
     log?: DebugScanLog
 ) {
     let blockerBits = MASK_HARD_TEXT_BLOCKER;
     let runStart = -1;
-    for (let x = edge; x < limit; x++) {
+    let runEnd = -1;
+    let label = step < 0 ? "left" : "right";
+    let x = step < 0 ? edge - 1 : edge;
+    let inRange = (value: number) => step < 0 ? value >= limit : value < limit;
+    for (; inRange(x); x += step) {
         if (columnBitCount(mask, x, y0, y1, blockerBits) > 0) {
-            log?.(`horizontal-right: blocker at x=${x}, boundary=${Math.max(edge, x)}`);
-            return Math.max(edge, x);
+            let boundary = step < 0 ? Math.min(edge, x + 1) : Math.max(edge, x);
+            log?.(`horizontal-${label}: blocker at x=${x}, boundary=${boundary}`);
+            return boundary;
         }
 
         if (!columnMostlyEmpty(mask, x, y0, y1)) {
             runStart = -1;
+            runEnd = -1;
             continue;
         }
 
         if (runStart < 0) {
             runStart = x;
+            runEnd = x;
         }
-        if (x - runStart + 1 >= minBand) {
-            let boundary = clamp(runStart + padding, runStart, x + 1 - Math.ceil(minBand * 0.35));
-            log?.(`horizontal-right: whitespace band x=${runStart}..${x}, boundary=${boundary}`);
+        else {
+            runStart = Math.min(runStart, x);
+            runEnd = Math.max(runEnd, x);
+        }
+        if (runEnd - runStart + 1 >= minBand) {
+            let inset = Math.ceil(minBand * 0.35);
+            let boundary = step < 0
+                ? clamp(runEnd + 1 - padding, runStart + inset, runEnd + 1)
+                : clamp(runStart + padding, runStart, runEnd + 1 - inset);
+            log?.(`horizontal-${label}: whitespace band x=${runStart}..${runEnd}, boundary=${boundary}`);
             return boundary;
         }
     }
 
-    log?.(`horizontal-right: reached limit=${limit}, boundary=${Math.min(limit, edge + padding)}`);
-    return Math.min(limit, edge + padding);
+    let boundary = step < 0 ? Math.max(limit, edge - padding) : Math.min(limit, edge + padding);
+    log?.(`horizontal-${label}: reached limit=${limit}, boundary=${boundary}`);
+    return boundary;
 }
 
 function scanRectFromCaptionWhitespace(
@@ -2082,8 +2061,8 @@ function scanRectFromCaptionWhitespace(
     // 本文などの hard blocker に当たった場合は、この幅を満たさなくても手前で止まる。
     let minBand = Math.max(2, Math.ceil(Math.max(40, Math.min(searchRect.width, 280) * 0.16, bodyFontSize * 4.0) / mask.cellSize));
     log?.(`scan: horizontal padding=${padding} minBand=${minBand}`);
-    let x0 = lowerWhitespaceOrBlockerIndex(mask, xSpan.x0, vertical.x0, vertical.y0, vertical.y1, padding, minBand, log);
-    let x1 = upperWhitespaceOrBlockerIndex(mask, xSpan.x1, vertical.x1, vertical.y0, vertical.y1, padding, minBand, log);
+    let x0 = whitespaceOrBlockerIndex(mask, xSpan.x0, vertical.x0, vertical.y0, vertical.y1, padding, minBand, -1, log);
+    let x1 = whitespaceOrBlockerIndex(mask, xSpan.x1, vertical.x1, vertical.y0, vertical.y1, padding, minBand, 1, log);
     let rect = maskRangeToRect(mask, {...vertical, x0, x1});
     let result = intersectRectsLoose(rect, searchRect);
     log?.(`scan: result ${fmtRect(result)}`);
@@ -2124,7 +2103,7 @@ function trimFigureSideIntrusionAtColumnGap(
 
     if (captionCenter > columnSplit + 12 && seedRect.x > rect.x + minBand * mask.cellSize) {
         let ownedLeft = clamp(Math.floor((seedRect.x - mask.x) / mask.cellSize), range.x0 + 1, range.x1 - 1);
-        let x0 = lowerWhitespaceOrBlockerIndex(mask, ownedLeft, range.x0, range.y0, range.y1, padding, minBand, log);
+        let x0 = whitespaceOrBlockerIndex(mask, ownedLeft, range.x0, range.y0, range.y1, padding, minBand, -1, log);
         let newX = mask.x + x0 * mask.cellSize;
         if (newX > rect.x + mask.cellSize) {
             log?.(`figure: trimmed left intrusion x=${rect.x.toFixed(1)} -> ${newX.toFixed(1)}`);
@@ -2134,7 +2113,7 @@ function trimFigureSideIntrusionAtColumnGap(
 
     if (captionCenter < columnSplit - 12 && rectRight(seedRect) < rectRight(rect) - minBand * mask.cellSize) {
         let ownedRight = clamp(Math.ceil((rectRight(seedRect) - mask.x) / mask.cellSize), range.x0 + 1, range.x1 - 1);
-        let x1 = upperWhitespaceOrBlockerIndex(mask, ownedRight, range.x1, range.y0, range.y1, padding, minBand, log);
+        let x1 = whitespaceOrBlockerIndex(mask, ownedRight, range.x1, range.y0, range.y1, padding, minBand, 1, log);
         let newRight = mask.x + x1 * mask.cellSize;
         if (newRight < rectRight(rect) - mask.cellSize) {
             log?.(`figure: trimmed right intrusion right=${rectRight(rect).toFixed(1)} -> ${newRight.toFixed(1)}`);
@@ -2456,7 +2435,6 @@ function fitRectByCaptionSearch(
         return null;
     }
     finalRect = trimFigureSideIntrusionAtColumnGap(finalRect, anchorRect, captionLine, pageMask, bodyFontSize, metric, log);
-    finalRect = padFigureBottomTowardCaption(finalRect, captionLine, bodyFontSize);
     return finalRect;
 }
 
