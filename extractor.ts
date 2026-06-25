@@ -1882,7 +1882,8 @@ function findSeedTargetCell(
     let yStart = clamp(seedY, range.y0, range.y1 - 1);
     let radiusLimit = Math.max(3, Math.ceil(24 / mask.cellSize));
 
-    // caption 中央から図表方向へ伸ばした縦線近傍で、最初に触れる図表セルを seed にする。
+    // caption 中央から図表方向へ縦に進み、最初に触れた図表セルを seed にする。
+    // ここで範囲全体を探索すると、caption と無関係な図表へ飛ぶため縦スキャンだけに限定する。
     for (let y = yStart; y >= range.y0 && y < range.y1; y += direction) {
         for (let r = 0; r <= radiusLimit; r++) {
             let xs = r == 0 ? [centerX] : [centerX - r, centerX + r];
@@ -1894,24 +1895,10 @@ function findSeedTargetCell(
         }
     }
 
-    let best: {x: number; y: number; score: number} | null = null;
-    for (let y = range.y0; y < range.y1; y++) {
-        let offset = y * mask.width;
-        for (let x = range.x0; x < range.x1; x++) {
-            if ((mask.cells[offset + x] & bits) == 0) {
-                continue;
-            }
-            let score = Math.abs(x - centerX) * 2 + Math.abs(y - yStart);
-            if (!best || score < best.score) {
-                best = {x, y, score};
-            }
-        }
-    }
-
-    return best ? {x: best.x, y: best.y} : null;
+    return null;
 }
 
-function seededTargetColumnSpan(
+function scanTargetColumnSpanFromSeed(
     mask: OccupancyMask,
     range: {x0: number; x1: number; y0: number; y1: number},
     seedX: number,
@@ -1930,6 +1917,8 @@ function seededTargetColumnSpan(
     let seedCell = seed;
     let emptyBand = Math.max(2, Math.ceil(Math.max(6, mask.cellSize * 2) / mask.cellSize));
 
+    // seed から左右へ列単位で伸ばし、図表セルがなくなって空白帯または本文 blocker に当たったところで止める。
+    // 連結成分は使わず、caption から見た水平方向のスキャンだけで横幅を決める。
     function scanEdge(step: -1 | 1) {
         let lastContent = seedCell.x;
         let emptyRun = 0;
@@ -2076,7 +2065,7 @@ function scanRectFromCaptionWhitespace(
         globalWidth >= (range.x1 - range.x0) * 0.65 &&
         (seedRatio < 0.38 || seedRatio > 0.62);
     if (wideAmbiguousTarget) {
-        let seededSpan = seededTargetColumnSpan(mask, vertical, seedX, seedY, direction, targetBits, scanBits, log);
+        let seededSpan = scanTargetColumnSpanFromSeed(mask, vertical, seedX, seedY, direction, targetBits, scanBits, log);
         let seededWidth = seededSpan ? seededSpan.x1 - seededSpan.x0 : 0;
         if (seededSpan && (allowNarrowSeedSpan || seededWidth >= globalWidth * 0.65)) {
             log?.(`scan: replace global target columns x=${xSpan.x0}..${xSpan.x1 - 1} with seeded x=${seededSpan.x0}..${seededSpan.x1 - 1}`);
@@ -2492,8 +2481,6 @@ function hasSideBySideFigureCaption(
     );
 }
 
-// Figure が縦に続くページでは、現在の Figure の上側候補に直前 Figure のキャプションが入ることがある。
-// 候補内に別のキャプションを見つけたら、その直下で上端を切り、前の図を巻き込まないようにする。
 function findSeparatorBelowCaption(rect: PDF_Rect, mask: OccupancyMask, searchTop: number, bodyFontSize: number, log?: DebugScanLog) {
     let depth = Math.max(36, bodyFontSize * 5);
     let searchRect = {
@@ -2508,6 +2495,8 @@ function findSeparatorBelowCaption(rect: PDF_Rect, mask: OccupancyMask, searchTo
         return null;
     }
 
+    // 枠付きの図グリッドでは、前の caption と現在の図の間に水平罫線が入ることがある。
+    // その罫線を見つけられれば、caption 文字の実描画位置に依存せず安全に上端を切れる。
     let minShape = Math.max(12, Math.floor((range.x1 - range.x0) * 0.7));
     for (let y = range.y1 - 1; y >= range.y0; y--) {
         if (rowBitCount(mask, y, range.x0, range.x1, MASK_SHAPE) >= minShape) {
@@ -2520,6 +2509,8 @@ function findSeparatorBelowCaption(rect: PDF_Rect, mask: OccupancyMask, searchTo
     return null;
 }
 
+// Figure が縦に続くページでは、現在の Figure の上側候補に直前 Figure のキャプションが入ることがある。
+// 候補内に別のキャプションを見つけたら、その直下で上端を切り、前の図を巻き込まないようにする。
 function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], mask: OccupancyMask, bodyFontSize: number, columnWidth: number, log?: DebugScanLog) {
     let top = rect.y + rect.height;
     let topTolerance = Math.max(2, bodyFontSize * 0.4);
@@ -2536,7 +2527,7 @@ function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], mask
     if (!previousCaption) {
         return rect;
     }
-    log?.(`figure: previous caption trim anchor y=${previousCaption.y.toFixed(1)} font=${previousCaption.fontSize.toFixed(1)} width=${previousCaption.width.toFixed(1)} rectWidth=${rect.width.toFixed(1)} text="${previousCaption.text}"`);
+    log?.(`figure: previous caption trim anchor y=${previousCaption.y.toFixed(1)} text="${previousCaption.text}"`);
 
     let captionBaselineBottom = previousCaption.y;
     let captionBoxBottom = lineRect(previousCaption).y;
@@ -2574,8 +2565,9 @@ function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], mask
         prevLine = line;
     }
 
-    // 太字 caption は PDF.js の y より下へ描画されることがあるため、bbox 下端から余白を取る。
     let deepCaption = top - previousCaption.y > Math.max(40, bodyFontSize * 5.0);
+    // 通常は従来どおり baseline 基準で切る。深く入り込んだ caption は枠付き図で残りやすいため、
+    // bbox 下端と水平罫線を使って、文字の下側まで確実に落とす。
     let fallbackTop = deepCaption
         ? captionBoxBottom - Math.max(bodyFontSize * 1.8, previousCaption.fontSize * 1.4, 16)
         : captionBaselineBottom - Math.max(bodyFontSize * 0.8, 8);
