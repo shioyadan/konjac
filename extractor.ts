@@ -1150,14 +1150,6 @@ function rectContainsRect(outer: PDF_Rect, inner: PDF_Rect, margin = 0) {
         rectTop(inner) <= rectTop(outer) + margin;
 }
 
-function unionRects(a: PDF_Rect, b: PDF_Rect): PDF_Rect {
-    let x = Math.min(a.x, b.x);
-    let y = Math.min(a.y, b.y);
-    let right = Math.max(rectRight(a), rectRight(b));
-    let top = Math.max(rectTop(a), rectTop(b));
-    return {page: a.page, x, y, width: right - x, height: top - y};
-}
-
 function intersectRectsLoose(a: PDF_Rect, b: PDF_Rect) {
     if (a.page != b.page) {
         return null;
@@ -1204,8 +1196,8 @@ function isWideFigureWidth(width: number, columnWidth: number, metric: PageMetri
         width > columnWidth * 1.25 && width > metric.width * 0.4;
 }
 
-// bitmap scan の横方向の探索幅を決めるため、キャプション位置からカラム内のアンカーだけを作る。
-function captionSearchAnchorRect(captionLine: TextLine, tableCaption: boolean, columnWidth: number, metric: PageMetrics) {
+// Figure の最終的な owner 補正に使うため、キャプション位置からカラム内のアンカーだけを作る。
+function captionSearchAnchorRect(captionLine: TextLine, columnWidth: number, metric: PageMetrics) {
     let pageMargin = 36;
     let padding = Math.max(6, captionLine.fontSize * 0.8);
 
@@ -1223,11 +1215,6 @@ function captionSearchAnchorRect(captionLine: TextLine, tableCaption: boolean, c
     let x = isWide
         ? Math.max(pageMargin, metric.minX - 4)
         : Math.min(captionX, Math.max(columnX, captionX - maxColumnSnap));
-    if (tableCaption && !isWide) {
-        // 表ラベルは短く中央寄せされやすいので、表本体はカラム左端から切り出す。
-        x = columnX;
-    }
-
     // wide 図表は本文領域全体、通常図表は推定カラム幅を基本幅として切り出す。
     let width = isWide
         ? Math.min(metric.width - x - pageMargin, Math.max(metric.maxX - x + 4, captionLine.width + padding * 2))
@@ -1405,28 +1392,6 @@ function isLikelyCaptionContinuationLine(
     return sameColumn && closeLineGap && compatibleFont;
 }
 
-// Table は bitmap scan で縦範囲を決め、同じ高さにある罫線・枠で横幅だけ補う。
-function expandTableRectToRules(rect: PDF_Rect, graphics: PDF_GraphicObject[], metric: PageMetrics) {
-    let band = expandRect(rect, 8, metric);
-    let ruleBox = unionAllRects(
-        graphics
-            .filter((graphic) =>
-                graphic.page == rect.page &&
-                usefulGraphicObject(graphic, metric) &&
-                rectsOverlap(graphic, band)
-            )
-            .map((graphic) => intersectRectsLoose(expandRect(graphic, Math.max(2, graphic.strokeWidth ?? 1), metric), band))
-            .filter((rect): rect is PDF_Rect => rect != null)
-    );
-    if (!ruleBox) {
-        return rect;
-    }
-
-    let x = clamp(Math.min(rect.x, ruleBox.x), 0, metric.width);
-    let right = clamp(Math.max(rectRight(rect), rectRight(ruleBox)), x + 24, metric.width);
-    return {...rect, x, width: right - x};
-}
-
 function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
     if (graphic.width <= 0 || graphic.height <= 0) {
         return false;
@@ -1553,10 +1518,6 @@ function excludedCaptionGraphics(graphics: PDF_GraphicObject[], figures: FigureC
         usefulGraphicObject(graphic, metric) &&
         graphicExcludedByCaption(graphic, captionLines, metric)
     );
-}
-
-function unionAllRects(rects: PDF_Rect[]) {
-    return rects.reduce((box, rect) => box ? unionRects(box, rect) : rect, null as PDF_Rect | null);
 }
 
 function createOccupancyMask(rect: PDF_Rect, cellSize = OCCUPANCY_CELL_SIZE): OccupancyMask {
@@ -2395,7 +2356,6 @@ function padFigureBottomTowardCaption(rect: PDF_Rect, captionLine: TextLine, bod
 }
 
 function fitTableRectByBitmap(
-    anchorRect: PDF_Rect,
     captionLines: TextLine[],
     pageMask: OccupancyMask,
     bodyFontSize: number,
@@ -2741,14 +2701,11 @@ function collectFigureCandidates(
         }
 
         let tableCaption = isTableCaption(caption);
-        let anchorRect = captionSearchAnchorRect(line, tableCaption, columnWidth, metric);
         let scanLog = scanLoggerForCaption(options, caption);
         let rect: PDF_Rect | null = null;
-        if (anchorRect && tableCaption) {
+        if (tableCaption) {
             scanLog?.(`caption: "${caption}"`);
-            scanLog?.(`table: anchor ${fmtRect(anchorRect)}`);
             rect = fitTableRectByBitmap(
-                anchorRect,
                 lines.slice(i, endIndex + 1),
                 pageMask,
                 bodyFontSize,
@@ -2758,24 +2715,25 @@ function collectFigureCandidates(
             );
             if (rect) {
                 scanLog?.(`table: after bitmap ${fmtRect(rect)}`);
-                rect = expandTableRectToRules(rect, graphics, metric);
-                scanLog?.(`table: after rule expansion ${fmtRect(rect)}`);
             }
             else {
                 scanLog?.("table: bitmap scan failed -> rect=null");
             }
         }
-        else if (anchorRect) {
-            scanLog?.(`caption: "${caption}"`);
-            scanLog?.(`figure: anchor ${fmtRect(anchorRect)}`);
-            rect = fitRectByCaptionSearch(anchorRect, line, pageMask, bodyFontSize, columnWidth, metric, scanLog);
-            scanLog?.(`figure: after bitmap scan ${fmtRect(rect)}`);
-            if (rect) {
-                rect = trimFigureRectAtPreviousCaption(rect, lines, pageMask, bodyFontSize, columnWidth, scanLog);
-                scanLog?.(`figure: after final previous-caption trim ${fmtRect(rect)}`);
-                rect = padFigureBottomTowardCaption(rect, line, bodyFontSize);
-                scanLog?.(`figure: after caption padding ${fmtRect(rect)}`);
-                scanLog?.(`figure: final ${fmtRect(rect)}`);
+        else {
+            let anchorRect = captionSearchAnchorRect(line, columnWidth, metric);
+            if (anchorRect) {
+                scanLog?.(`caption: "${caption}"`);
+                scanLog?.(`figure: anchor ${fmtRect(anchorRect)}`);
+                rect = fitRectByCaptionSearch(anchorRect, line, pageMask, bodyFontSize, columnWidth, metric, scanLog);
+                scanLog?.(`figure: after bitmap scan ${fmtRect(rect)}`);
+                if (rect) {
+                    rect = trimFigureRectAtPreviousCaption(rect, lines, pageMask, bodyFontSize, columnWidth, scanLog);
+                    scanLog?.(`figure: after final previous-caption trim ${fmtRect(rect)}`);
+                    rect = padFigureBottomTowardCaption(rect, line, bodyFontSize);
+                    scanLog?.(`figure: after caption padding ${fmtRect(rect)}`);
+                    scanLog?.(`figure: final ${fmtRect(rect)}`);
+                }
             }
         }
 
