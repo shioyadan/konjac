@@ -888,6 +888,14 @@ function shouldStartParagraph(line: TextLine, prevLine: TextLine | null, columnW
         return false;
     }
 
+    if (isReferenceEntryStart(paragraph) && !isReferenceEntryStart(line.text)) {
+        return false;
+    }
+
+    if (paragraph != "" && isReferenceEntryStart(line.text)) {
+        return true;
+    }
+
     if (paragraph.startsWith("•") && !line.text.startsWith("•")) {
         return false;
     }
@@ -945,6 +953,10 @@ function startsLikeNewBlock(text: string) {
         /^Observation-\d+/.test(trimmed) ||
         /^(?:[A-Z]|[IVX]+)\.\s+/.test(trimmed)
     );
+}
+
+function isReferenceEntryStart(text: string) {
+    return /^(?:\[\d+\]|\d+\.)\s+/.test(text.trim());
 }
 
 // 図中の目盛りやベンチマーク名の列は数字・記号・短い識別子から始まりやすい。
@@ -2828,6 +2840,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let title = "";
     let paragraph = "";
     let prevTextLine: TextLine | null = null;
+    let inReferencesSection = false;
 
     // 複数行に分かれたタイトルを 1 つのノードにまとめる。
     function flushTitle() {
@@ -2865,7 +2878,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             continue;
         }
 
-        if (shouldDropStructuralFragmentLine(line, bodyFontSize, columnWidth)) {
+        if (!inReferencesSection && shouldDropStructuralFragmentLine(line, bodyFontSize, columnWidth)) {
             let prevLine = i > 0 ? readingLines[i - 1] : null;
             let nextLine = readingLines[i + 1];
             if (
@@ -2881,12 +2894,14 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             flushParagraph();
             title = appendLineText(title, line.text);
             prevTextLine = null;
+            inReferencesSection = false;
         }
         else if (isHeadingLine(line, bodyFontSize)) {
             flushTitle();
             flushParagraph();
             nodes.push(new PDF_Node(line.text, PDF_NodeType.HEADING));
             prevTextLine = null;
+            inReferencesSection = isReferencesHeading(line.text);
         }
         else {
             flushTitle();
