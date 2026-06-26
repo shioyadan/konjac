@@ -7,9 +7,12 @@ import {
     PDF_NodeType,
     PDF_PageInput,
     PDF_Rect,
+    buildHTMLLinkContext,
     extractNodesFromPages,
     extractPageInputFromPDFPage,
     figureImageDisplayWidth,
+    linkedNodeHTML,
+    nodeHTMLId,
     nodeToHTMLElementName
 } from "./extractor";
 
@@ -111,10 +114,15 @@ function show(nodes: PDF_Node[]) {
     }
 
     main.replaceChildren();
+    let linkContext = buildHTMLLinkContext(nodes);
 
     for (let node of nodes) {
+        let id = nodeHTMLId(node, linkContext);
         if (node.type == PDF_NodeType.FIGURE) {
             let figure = document.createElement("figure");
+            if (id) {
+                figure.id = id;
+            }
             figure.style.margin = "1.5rem 0";
             if (node.imageSrc) {
                 let image = document.createElement("img");
@@ -129,16 +137,18 @@ function show(nodes: PDF_Node[]) {
             }
 
             let caption = document.createElement("figcaption");
-            caption.appendChild(document.createTextNode(node.str));
+            caption.innerHTML = linkedNodeHTML(node, linkContext);
             caption.style.textAlign = "left";
             figure.appendChild(caption);
             main.appendChild(figure);
             continue;
         }
 
-        let text = document.createTextNode(node.str);
         let div = document.createElement(nodeToHTMLElementName(node));
-        div.appendChild(text);
+        if (id) {
+            div.id = id;
+        }
+        div.innerHTML = linkedNodeHTML(node, linkContext);
         main.appendChild(div);
     }
 

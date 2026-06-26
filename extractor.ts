@@ -2964,6 +2964,172 @@ function escapeHTML(str: string) {
         .replace(/"/g, "&quot;");
 }
 
+interface HTMLLinkContext {
+    ids: Map<PDF_Node, string>;
+    sections: Map<string, string>;
+    figures: Map<string, string>;
+    tables: Map<string, string>;
+    references: Map<string, string>;
+}
+
+function anchorKey(text: string) {
+    return text.toLowerCase().replace(/\.$/, "");
+}
+
+function anchorId(prefix: string, key: string) {
+    return `${prefix}-${key.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}`;
+}
+
+function uniqueAnchorId(base: string, used: Set<string>) {
+    let id = base;
+    for (let i = 2; used.has(id); i++) {
+        id = `${base}-${i}`;
+    }
+    used.add(id);
+    return id;
+}
+
+function captionAnchor(node: PDF_Node) {
+    let match = node.str.match(new RegExp(`^(Figure|Fig\\.|Table)\\s+(${CAPTION_NUMBER_PATTERN})\\b`, "i"));
+    if (!match) {
+        return null;
+    }
+
+    let kind = /^Table$/i.test(match[1]) ? "table" : "figure";
+    return {kind, key: anchorKey(match[2]), id: anchorId(kind, match[2])};
+}
+
+function headingAnchor(node: PDF_Node) {
+    let text = node.str.trim();
+    if (isAbstractHeading(text)) {
+        return {kind: "section", key: "abstract", id: "abstract"};
+    }
+    if (isReferencesHeading(text)) {
+        return {kind: "section", key: "references", id: "references"};
+    }
+
+    let arabic = arabicSectionNumbers(text);
+    if (arabic) {
+        let key = arabic.join(".");
+        return {kind: "section", key, id: anchorId("section", key)};
+    }
+
+    let roman = text.match(/^([IVX]+)\./i);
+    if (roman) {
+        return {kind: "section", key: anchorKey(roman[1]), id: anchorId("section", roman[1])};
+    }
+
+    let letter = text.match(/^([A-Z])\./);
+    return letter ? {kind: "section", key: anchorKey(letter[1]), id: anchorId("section", letter[1])} : null;
+}
+
+function referenceAnchor(node: PDF_Node) {
+    let match = node.str.trim().match(/^(?:\[(\d+)\]|(\d+)\.)\s+/);
+    if (!match) {
+        return null;
+    }
+
+    let key = match[1] ?? match[2];
+    return {kind: "reference", key, id: anchorId("ref", key)};
+}
+
+export function buildHTMLLinkContext(nodes: PDF_Node[]): HTMLLinkContext {
+    let context: HTMLLinkContext = {
+        ids: new Map(),
+        sections: new Map(),
+        figures: new Map(),
+        tables: new Map(),
+        references: new Map()
+    };
+    let used = new Set<string>();
+
+    for (let node of nodes) {
+        let target =
+            node.type == PDF_NodeType.FIGURE ? captionAnchor(node) :
+            node.type == PDF_NodeType.HEADING ? headingAnchor(node) :
+            node.type == PDF_NodeType.TEXT ? referenceAnchor(node) :
+            null;
+        if (!target) {
+            continue;
+        }
+
+        let id = uniqueAnchorId(target.id, used);
+        context.ids.set(node, id);
+        if (target.kind == "figure") {
+            context.figures.set(target.key, id);
+        }
+        else if (target.kind == "table") {
+            context.tables.set(target.key, id);
+        }
+        else if (target.kind == "reference") {
+            context.references.set(target.key, id);
+        }
+        else {
+            context.sections.set(target.key, id);
+        }
+    }
+
+    return context;
+}
+
+export function nodeHTMLId(node: PDF_Node, context: HTMLLinkContext) {
+    return context.ids.get(node) ?? "";
+}
+
+function linkHTML(label: string, targetId: string, currentId: string) {
+    let escaped = escapeHTML(label);
+    return targetId && targetId != currentId ? `<a href="#${escapeHTML(targetId)}">${escaped}</a>` : escaped;
+}
+
+function linkCitationHTML(label: string, context: HTMLLinkContext) {
+    let body = label.slice(1, -1);
+    return `[${body.replace(/\d+/g, (number) => {
+        let target = context.references.get(number);
+        return target ? `<a href="#${escapeHTML(target)}">${escapeHTML(number)}</a>` : escapeHTML(number);
+    })}]`;
+}
+
+export function linkedNodeHTML(node: PDF_Node, context: HTMLLinkContext) {
+    let currentId = nodeHTMLId(node, context);
+    let linkReferences = !(node.type == PDF_NodeType.TEXT && referenceAnchor(node));
+    let pattern = /\[(?:\d+(?:\s*[-–,]\s*\d+)*)\]|\b(?:Fig\.|Figure)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\b|\bTable\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\b|\b(?:Sec\.|Section|Sections|Secs\.)\s+\d+(?:\.\d+)*/gi;
+    let html = "";
+    let offset = 0;
+
+    for (let match of node.str.matchAll(pattern)) {
+        let text = match[0];
+        let index = match.index ?? 0;
+        html += escapeHTML(node.str.slice(offset, index));
+
+        let target = "";
+        let figure = text.match(/^(?:Fig\.|Figure)\s+(.+)$/i);
+        let table = text.match(/^Table\s+(.+)$/i);
+        let section = text.match(/^(?:Sec\.|Section|Sections|Secs\.)\s+(.+)$/i);
+        if (text.startsWith("[") && linkReferences) {
+            html += linkCitationHTML(text, context);
+        }
+        else if (figure) {
+            target = context.figures.get(anchorKey(figure[1])) ?? "";
+            html += linkHTML(text, target, currentId);
+        }
+        else if (table) {
+            target = context.tables.get(anchorKey(table[1])) ?? "";
+            html += linkHTML(text, target, currentId);
+        }
+        else if (section) {
+            target = context.sections.get(anchorKey(section[1])) ?? "";
+            html += linkHTML(text, target, currentId);
+        }
+        else {
+            html += escapeHTML(text);
+        }
+
+        offset = index + text.length;
+    }
+
+    return html + escapeHTML(node.str.slice(offset));
+}
+
 // 構造ノード種別を HTML タグに対応づける。
 export function nodeToHTMLElementName(node: PDF_Node) {
     switch (node.type) {
@@ -2993,18 +3159,21 @@ export function figureImageDisplayWidth(rect?: PDF_Rect) {
 
 // CLI 出力用の最小 HTML を生成する。
 export function nodesToHTML(nodes: PDF_Node[]) {
+    let linkContext = buildHTMLLinkContext(nodes);
     let body = nodes.map((node) => {
+        let id = nodeHTMLId(node, linkContext);
+        let idAttr = id ? ` id="${escapeHTML(id)}"` : "";
         if (node.type == PDF_NodeType.FIGURE) {
             let imageWidth = figureImageDisplayWidth(node.rect);
             let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
             let image = node.imageSrc
                 ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
                 : "";
-            return `<figure>${image}<figcaption>${escapeHTML(node.str)}</figcaption></figure>`;
+            return `<figure${idAttr}>${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption></figure>`;
         }
 
         let tag = nodeToHTMLElementName(node);
-        return `<${tag}>${escapeHTML(node.str)}</${tag}>`;
+        return `<${tag}${idAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`;
     }).join("\n");
 
     return `<!DOCTYPE html>
@@ -3014,6 +3183,8 @@ export function nodesToHTML(nodes: PDF_Node[]) {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         main { max-width: 760px; margin: 0 auto; line-height: 1.55; }
+        main a { color: #0645ad; text-decoration: none; }
+        main a:hover { text-decoration: underline; }
         figure { margin: 1.5rem 0; }
         figure img { display: block; max-width: 100%; height: auto; margin: 0 auto 0.5rem; }
         figcaption { font-size: 0.92rem; color: #333; text-align: left; }
