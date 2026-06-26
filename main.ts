@@ -49,8 +49,8 @@ function main() {
             // let response = await fetch(orgURL);
             // let blobResponse = await response.blob();
 
-            // PDF ファイルを１回ダウンロードしてから開く
-            let id = await chrome.downloads.download({url: orgURL, filename: "test.pdf"}); 
+            // PDF ファイルを１回ダウンロードしてから開く。ファイル名は Chrome に推定させ、元の名前を使う。
+            let id = await chrome.downloads.download({url: orgURL, conflictAction: "uniquify"}); 
             chrome.downloads.onChanged.addListener(async (delta) => {
                 if (delta.id == id && delta.state && delta.state.current == "complete") {
                     let result = await chrome.downloads.search({id: id}); 
