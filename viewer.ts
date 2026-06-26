@@ -180,10 +180,13 @@ function load(fileName: string) {
 chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
     let url = tabs[0].url;
     // file= にローカルにダウンロードした PDF の URL が埋め込まれているので，それをロードする
-    if (url && url.match(/\?file=(.+)$/)) {
-        let targetURL = decodeURIComponent(RegExp.$1);
+    if (url) {
+        let targetURL = new URL(url).searchParams.get("file");
+        if (!targetURL) {
+            return;
+        }
         console.log(targetURL);
-        load(targetURL);        
+        load(targetURL);
     }
 });
 
