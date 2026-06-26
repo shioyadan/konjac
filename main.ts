@@ -1,14 +1,32 @@
 "use strict";
 
 const ID_KONJAC = "ID_KONJAC";
+const CONTEXT_MENU_PROPS = {
+    "title": "View PDF",
+    "contexts": ["all"] as ["all"]
+};
+
+function createContextMenu() {
+    chrome.contextMenus.update(ID_KONJAC, CONTEXT_MENU_PROPS, () => {
+        if (!chrome.runtime.lastError) {
+            return;
+        }
+
+        chrome.contextMenus.create({
+            "id": ID_KONJAC,
+            ...CONTEXT_MENU_PROPS
+        }, () => {
+            let error = chrome.runtime.lastError;
+            if (error) {
+                console.warn(`Failed to create context menu: ${error.message}`);
+            }
+        });
+    });
+}
 
 function main() {
-    // コンテクストメニューの追加
-    chrome.contextMenus.create({
-        "id": ID_KONJAC,
-        "title": "View PDF",
-        "contexts": ["all"]
-    });
+    // service worker が再起動しても同じ id のメニューを重複作成しない。
+    createContextMenu();
 
     // クリックハンドラの登録
     chrome.contextMenus.onClicked.addListener(async (info) => {
