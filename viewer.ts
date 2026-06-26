@@ -130,7 +130,7 @@ function show(nodes: PDF_Node[]) {
 
             let caption = document.createElement("figcaption");
             caption.appendChild(document.createTextNode(node.str));
-            caption.style.textAlign = "center";
+            caption.style.textAlign = "left";
             figure.appendChild(caption);
             main.appendChild(figure);
             continue;
