@@ -1018,6 +1018,29 @@ function isUppercaseCaptionContinuation(text: string) {
         /^[A-Z0-9 .,&()/§\-]+$/.test(trimmed);
 }
 
+function isTightCaptionBlockContinuation(
+    captionLine: TextLine,
+    prevLine: TextLine,
+    nextLine: TextLine,
+    bodyFontSize: number
+) {
+    if (nextLine.page != captionLine.page || nextLine.y >= prevLine.y) {
+        return false;
+    }
+
+    let xTolerance = Math.max(6, bodyFontSize * 0.8);
+    let sameLeftEdge =
+        Math.abs(nextLine.x - captionLine.x) <= xTolerance ||
+        Math.abs(nextLine.x - prevLine.x) <= xTolerance;
+    let gap = prevLine.y - nextLine.y;
+    let tightLineGap = gap > 0 && gap <= Math.max(12, bodyFontSize * 1.25, captionLine.fontSize * 1.45);
+    let compatibleFont =
+        Math.abs(nextLine.fontSize - prevLine.fontSize) <= 0.8 &&
+        nextLine.fontSize <= captionLine.fontSize + 1.0;
+
+    return sameLeftEdge && tightLineGap && compatibleFont;
+}
+
 // 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
 function looksLikeInterruptedParagraph(before: string, after: string) {
     if (before.trim() == "" || after.trim() == "" || startsLikeNewBlock(after)) {
@@ -2690,11 +2713,20 @@ function collectFigureCandidates(
         }
 
         let captionLines = 1;
-        while (!captionLooksComplete(caption) && captionLines < 20 && endIndex + 1 < lines.length) {
+        while (captionLines < 20 && endIndex + 1 < lines.length) {
             let next = lines[endIndex + 1];
             let tableCaption = isTableCaption(caption);
+            let captionComplete = captionLooksComplete(caption);
+            let completedCaptionBlockContinuation =
+                captionComplete &&
+                isTightCaptionBlockContinuation(line, lines[endIndex], next, bodyFontSize);
+            if (captionComplete && !completedCaptionBlockContinuation) {
+                break;
+            }
+
             if (
                 tableCaption &&
+                !completedCaptionBlockContinuation &&
                 !caption.endsWith("-") &&
                 !/^[("']?\s*[a-z]/.test(next.text.trim()) &&
                 !isUppercaseCaptionContinuation(next.text)
