@@ -896,15 +896,20 @@ function shouldStartParagraph(line: TextLine, prevLine: TextLine | null, columnW
         return true;
     }
 
-    if (paragraph.startsWith("•") && !line.text.startsWith("•")) {
+    let paragraphIsListItem = isListItemStart(paragraph);
+    let lineIsListItem = isListItemStart(line.text);
+    if (paragraphIsListItem && !lineIsListItem) {
+        let lineGap = prevLine.y - line.y;
+        let widerThanWrappedLine = lineGap > Math.max(11.5, prevLine.fontSize * 1.25, line.fontSize * 1.25);
+        // 箇条書きの後続行は深いインデントになりやすい。左端が本文側へ戻り、
+        // かつ通常の折り返し行より行間が広い場合だけ、箇条書き後の段落とみなす。
+        if (line.x < prevLine.x - 4 && widerThanWrappedLine) {
+            return true;
+        }
         return false;
     }
 
-    if (/^\d+\.\s/.test(paragraph) && !/^\d+\.\s/.test(line.text)) {
-        return false;
-    }
-
-    if (line.text.startsWith("•")) {
+    if (lineIsListItem) {
         return true;
     }
 
@@ -951,8 +956,13 @@ function startsLikeNewBlock(text: string) {
     return (
         /^(?:Figure|Fig\.|Table|Algorithm)\s+/i.test(trimmed) ||
         /^Observation-\d+/.test(trimmed) ||
+        isListItemStart(trimmed) ||
         /^(?:[A-Z]|[IVX]+)\.\s+/.test(trimmed)
     );
+}
+
+function isListItemStart(text: string) {
+    return /^(?:•|\d+\.)\s+/.test(text.trim());
 }
 
 function isReferenceEntryStart(text: string) {
