@@ -1,6 +1,7 @@
 "use strict";
 
 const ID_KONJAC = "ID_KONJAC";
+const CHROME_PDF_VIEWER_EXTENSION_ID = "mhjfbmdgcfjbbpaeojofohoefgiehjai";
 const CONTEXT_MENU_PROPS = {
     "title": "View PDF",
     "contexts": ["all"] as ["all"]
@@ -45,20 +46,78 @@ function sanitizeDownloadFileName(fileName: string) {
     return sanitized;
 }
 
-function pdfURLFromContext(info: chrome.contextMenus.OnClickData) {
-    for (let urlText of [info.linkUrl, info.srcUrl, info.frameUrl, info.pageUrl]) {
-        if (!urlText) {
+function isChromePDFViewerURL(url: URL) {
+    return url.protocol == "chrome-extension:" && url.hostname == CHROME_PDF_VIEWER_EXTENSION_ID;
+}
+
+function originalURLFromChromePDFViewerURL(url: URL) {
+    if (!isChromePDFViewerURL(url)) {
+        return "";
+    }
+
+    for (let key of ["src", "file", "url"]) {
+        let value = url.searchParams.get(key);
+        if (!value) {
             continue;
         }
+
         try {
-            let url = new URL(urlText);
-            return url.toString();
+            let originalURL = new URL(value);
+            if (!isChromePDFViewerURL(originalURL)) {
+                return originalURL.toString();
+            }
         }
         catch {
-            return urlText;
+            continue;
+        }
+    }
+
+    return "";
+}
+
+function downloadableURL(urlText: string | undefined) {
+    if (!urlText) {
+        return "";
+    }
+
+    try {
+        let url = new URL(urlText);
+        let originalURL = originalURLFromChromePDFViewerURL(url);
+        if (originalURL) {
+            return originalURL;
+        }
+        if (isChromePDFViewerURL(url)) {
+            return "";
+        }
+        return url.toString();
+    }
+    catch {
+        return urlText;
+    }
+}
+
+function firstDownloadableURL(urls: (string | undefined)[]) {
+    for (let urlText of urls) {
+        let url = downloadableURL(urlText);
+        if (url) {
+            return url;
         }
     }
     return "";
+}
+
+function pdfURLFromContext(info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) {
+    let directURL = firstDownloadableURL([info.linkUrl, info.srcUrl]);
+    if (directURL) {
+        return directURL;
+    }
+
+    let frameURL = firstDownloadableURL([info.frameUrl]);
+    if (frameURL) {
+        return frameURL;
+    }
+
+    return firstDownloadableURL([info.pageUrl, tab?.url]);
 }
 
 function queryPDFName(url: URL) {
@@ -138,14 +197,14 @@ function main() {
     createContextMenu();
 
     // クリックハンドラの登録
-    chrome.contextMenus.onClicked.addListener(async (info) => {
+    chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         if (info.menuItemId == ID_KONJAC) {
             const viewerURL = chrome.runtime.getURL("viewer.html");
 
-            let orgURL = pdfURLFromContext(info);
+            let orgURL = pdfURLFromContext(info, tab);
 
             if (!orgURL) {
-                console.log(`Invalid URL: ${orgURL}`);
+                console.log("Invalid URL", {info, tabURL: tab?.url});
                 return;
             }
 
