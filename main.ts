@@ -45,17 +45,73 @@ function sanitizeDownloadFileName(fileName: string) {
     return sanitized;
 }
 
+function pdfURLFromContext(info: chrome.contextMenus.OnClickData) {
+    for (let urlText of [info.linkUrl, info.srcUrl, info.frameUrl, info.pageUrl]) {
+        if (!urlText) {
+            continue;
+        }
+        try {
+            let url = new URL(urlText);
+            return url.toString();
+        }
+        catch {
+            return urlText;
+        }
+    }
+    return "";
+}
+
+function queryPDFName(url: URL) {
+    for (let key of ["filename", "file", "name"]) {
+        let value = url.searchParams.get(key);
+        if (value && /\.pdf$/i.test(value)) {
+            return sanitizeDownloadFileName(safeDecodeURIComponent(value));
+        }
+    }
+
+    return null;
+}
+
+function isGenericHandlerName(fileName: string) {
+    return /\.(?:html?|jsp|php|aspx?|cgi)$/i.test(fileName) || /^get(?:JSP|PDF)?$/i.test(fileName);
+}
+
+function fallbackPDFFileName(url: URL) {
+    let parts = [
+        url.hostname.replace(/^www\./, ""),
+        ...url.pathname.split("/").filter((part) => part != "" && !isGenericHandlerName(part))
+    ];
+
+    for (let [key, value] of url.searchParams) {
+        if (!value || /^utm_/i.test(key) || key == "tp") {
+            continue;
+        }
+        parts.push(`${key}-${value}`);
+        if (parts.length >= 4) {
+            break;
+        }
+    }
+
+    return sanitizeDownloadFileName(parts.join("-") || "download");
+}
+
 function suggestedPDFFileName(urlText: string) {
     try {
         let url = new URL(urlText);
+        let nameFromQuery = queryPDFName(url);
+        if (nameFromQuery) {
+            return nameFromQuery;
+        }
+
         let lastPathPart = url.pathname.split("/").filter((part) => part != "").pop();
-        if (lastPathPart) {
+        if (lastPathPart && !isGenericHandlerName(lastPathPart)) {
             return sanitizeDownloadFileName(safeDecodeURIComponent(lastPathPart));
         }
+        return fallbackPDFFileName(url);
     }
     catch {
         let lastPathPart = urlText.split(/[\\/]/).filter((part) => part != "").pop();
-        if (lastPathPart) {
+        if (lastPathPart && !isGenericHandlerName(lastPathPart)) {
             return sanitizeDownloadFileName(lastPathPart);
         }
     }
@@ -86,13 +142,7 @@ function main() {
         if (info.menuItemId == ID_KONJAC) {
             const viewerURL = chrome.runtime.getURL("viewer.html");
 
-            let orgURL: string|undefined = "";
-            if (info?.frameUrl) {
-                orgURL = info.frameUrl;
-            }
-            else if (info?.pageUrl) {
-                orgURL = info.pageUrl;
-            }
+            let orgURL = pdfURLFromContext(info);
 
             if (!orgURL) {
                 console.log(`Invalid URL: ${orgURL}`);
