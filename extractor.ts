@@ -1189,6 +1189,34 @@ function isTightCaptionBlockContinuation(
     return sameLeftEdge && tightLineGap && compatibleFont;
 }
 
+function isOpenTableCaptionContinuation(
+    caption: string,
+    captionLine: TextLine,
+    prevLine: TextLine,
+    nextLine: TextLine,
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    let trimmed = nextLine.text.trim();
+    if (
+        captionLooksComplete(caption) ||
+        trimmed.length < 10 ||
+        startsLikeNewBlock(trimmed) ||
+        !isTightCaptionBlockContinuation(captionLine, prevLine, nextLine, bodyFontSize)
+    ) {
+        return false;
+    }
+
+    let proseLike =
+        /[a-z]{3,}/i.test(trimmed) &&
+        /\s/.test(trimmed) &&
+        nextLine.width >= Math.min(90, columnWidth * 0.3);
+    return proseLike && (
+        startsLikeParagraphContinuation(trimmed) ||
+        /[.!?)]/.test(trimmed)
+    );
+}
+
 // 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
 function looksLikeInterruptedParagraph(before: string, after: string) {
     if (before.trim() == "" || after.trim() == "" || startsLikeNewBlock(after)) {
@@ -2220,7 +2248,8 @@ function scanRectFromCaptionWhitespace(
     bodyFontSize: number,
     columnWidth: number,
     verticalGapLimit: number,
-    log?: DebugScanLog
+    log?: DebugScanLog,
+    separatedContentGapLimit?: number
 ) {
     let range = maskRectRange(mask, searchRect);
     if (!range) {
@@ -2229,7 +2258,7 @@ function scanRectFromCaptionWhitespace(
     }
 
     log?.(`scan: start search=${fmtRect(searchRect)} cellRange x=${range.x0}..${range.x1 - 1} y=${range.y0}..${range.y1 - 1}`);
-    let blockerGapLimit = Math.max(5, bodyFontSize * 0.6);
+    let blockerGapLimit = separatedContentGapLimit ?? Math.max(5, bodyFontSize * 0.6);
     let seedRange = seedVerticalScanRange(mask, range, seedX, bodyFontSize, columnWidth, log);
     let seedVertical = scanVerticalSpanFromCaption(mask, seedRange, seedY, direction, targetBits, blockerGapLimit, verticalGapLimit, log);
     if (!seedVertical) {
@@ -2561,8 +2590,59 @@ function padFigureBottomTowardCaption(rect: PDF_Rect, captionLine: TextLine, bod
     return {...rect, y, height: rectTop(rect) - y};
 }
 
+function trimTableRectAtTextGap(
+    rect: PDF_Rect,
+    captionLines: TextLine[],
+    lines: TextLine[],
+    bodyFontSize: number,
+    log?: DebugScanLog
+) {
+    let captionEndLine = captionLines[captionLines.length - 1] ?? captionLines[0];
+    if (!captionEndLine) {
+        return rect;
+    }
+
+    let tableLines = lines
+        .filter((line) =>
+            line.page == rect.page &&
+            line.y < captionEndLine.y &&
+            line.y >= rect.y &&
+            lineCenterHorizontallyInsideRect(line, rect, Math.max(4, bodyFontSize * 0.5)) &&
+            !isPageDecoration(line)
+        )
+        .sort((a, b) => b.y - a.y);
+    if (tableLines.length < 3) {
+        return rect;
+    }
+
+    let gapLimit = Math.max(18, bodyFontSize * 2.0);
+    let prev = tableLines[0];
+    let tableLineCount = 1;
+    for (let i = 1; i < tableLines.length; i++) {
+        let line = tableLines[i];
+        let gap = prev.y - line.y;
+        let separateSmallFloatText = line.fontSize < bodyFontSize - 1.5;
+        if (tableLineCount >= 2 && gap > gapLimit && (separateSmallFloatText || gap > gapLimit * 1.25)) {
+            let y = lineRect(prev).y - Math.max(4, bodyFontSize * 0.6);
+            let trimmedY = clamp(y, rect.y, rectTop(rect) - 24);
+            if (trimmedY > rect.y + Math.max(bodyFontSize, 8)) {
+                log?.(`table: text-gap trim y=${rect.y.toFixed(1)} -> ${trimmedY.toFixed(1)} gap=${gap.toFixed(1)} next="${line.text}"`);
+                return {...rect, y: trimmedY, height: rectTop(rect) - trimmedY};
+            }
+            return rect;
+        }
+
+        prev = line;
+        tableLineCount++;
+    }
+
+    return rect;
+}
+
 function fitTableRectByBitmap(
     captionLines: TextLine[],
+    lines: TextLine[],
+    relaxedTableScan: boolean,
     pageMask: OccupancyMask,
     bodyFontSize: number,
     columnWidth: number,
@@ -2577,6 +2657,9 @@ function fitTableRectByBitmap(
     let searchRect = {...rawSearchRect, height: searchTop - rawSearchRect.y};
     let seedY = Math.floor((captionBottom - pageMask.y) / pageMask.cellSize) - 1;
     let seedX = captionLine.x + captionLine.width / 2;
+    let separatedContentGapLimit = relaxedTableScan
+        ? Math.max(bodyFontSize * 1.4, 12)
+        : undefined;
     let fitted = scanRectFromCaptionWhitespace(
         pageMask,
         searchRect,
@@ -2587,7 +2670,8 @@ function fitTableRectByBitmap(
         bodyFontSize,
         columnWidth,
         Math.max(bodyFontSize * 2.8, 26),
-        log
+        log,
+        separatedContentGapLimit
     );
 
     if (!fitted || rectArea(fitted) < 120) {
@@ -2600,6 +2684,9 @@ function fitTableRectByBitmap(
     if (!finalRect || finalRect.width < 24 || finalRect.height < 24) {
         log?.(`table: invalid final ${fmtRect(finalRect)}`);
         return null;
+    }
+    if (relaxedTableScan) {
+        finalRect = trimTableRectAtTextGap(finalRect, captionLines, lines, bodyFontSize, log);
     }
     log?.(`table: final candidate ${fmtRect(finalRect)}`);
 
@@ -2880,6 +2967,7 @@ function collectFigureCandidates(
         }
 
         let captionLines = 1;
+        let usedOpenTableCaptionContinuation = false;
         while (captionLines < 20 && endIndex + 1 < lines.length) {
             let next = lines[endIndex + 1];
             let tableCaption = isTableCaption(caption);
@@ -2887,6 +2975,9 @@ function collectFigureCandidates(
             let completedCaptionBlockContinuation =
                 captionComplete &&
                 isTightCaptionBlockContinuation(line, lines[endIndex], next, bodyFontSize);
+            let openTableCaptionContinuation =
+                tableCaption &&
+                isOpenTableCaptionContinuation(caption, line, lines[endIndex], next, bodyFontSize, columnWidth);
             if (captionComplete && !completedCaptionBlockContinuation) {
                 break;
             }
@@ -2894,6 +2985,7 @@ function collectFigureCandidates(
             if (
                 tableCaption &&
                 !completedCaptionBlockContinuation &&
+                !openTableCaptionContinuation &&
                 !caption.endsWith("-") &&
                 !/^[("']?\s*[a-z]/.test(next.text.trim()) &&
                 !isUppercaseCaptionContinuation(next.text)
@@ -2905,11 +2997,15 @@ function collectFigureCandidates(
                 isCaptionLine(next, bodyFontSize, columnWidth) ||
                 isTitleLine(next, bodyFontSize) ||
                 isHeadingLine(next, bodyFontSize) ||
-                !isLikelyCaptionContinuationLine(line, lines[endIndex], next, bodyFontSize, columnWidth)
+                !openTableCaptionContinuation &&
+                    !isLikelyCaptionContinuationLine(line, lines[endIndex], next, bodyFontSize, columnWidth)
             ) {
                 break;
             }
 
+            if (openTableCaptionContinuation) {
+                usedOpenTableCaptionContinuation = true;
+            }
             caption = appendLineText(caption, next.text);
             endIndex++;
             captionLines++;
@@ -2922,6 +3018,8 @@ function collectFigureCandidates(
             scanLog?.(`caption: "${caption}"`);
             rect = fitTableRectByBitmap(
                 lines.slice(i, endIndex + 1),
+                lines,
+                usedOpenTableCaptionContinuation,
                 pageMask,
                 bodyFontSize,
                 columnWidth,
