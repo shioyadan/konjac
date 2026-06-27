@@ -212,7 +212,7 @@ type Matrix = [number, number, number, number, number, number];
 // 同じ行とみなす y 座標差の許容値。
 const LINE_Y_EPSILON = 2.0;
 // 同一 y 座標上で別行・別カラムとみなす横方向の隙間。
-const COLUMN_GAP = 14.0;
+const COLUMN_GAP = 16.0;
 const IDENTITY_MATRIX: Matrix = [1, 0, 0, 1, 0, 0];
 const OCCUPANCY_CELL_SIZE = 2.0;
 const MASK_BODY = 1 << 0;
@@ -526,6 +526,43 @@ function partsToLine(parts: TextPart[]) {
     };
 }
 
+function dominantFontSize(parts: TextPart[], fallback: number) {
+    let weightedParts = parts
+        .map((part) => ({
+            fontSize: part.fontSize,
+            weight: Math.max(part.width, part.text.trim().length)
+        }))
+        .filter((part) => part.weight > 0)
+        .sort((a, b) => a.fontSize - b.fontSize);
+
+    if (weightedParts.length == 0) {
+        return fallback;
+    }
+
+    let totalWeight = weightedParts.reduce((sum, part) => sum + part.weight, 0);
+    let halfway = totalWeight / 2;
+    let accumulated = 0;
+    for (let part of weightedParts) {
+        accumulated += part.weight;
+        if (accumulated >= halfway) {
+            return part.fontSize;
+        }
+    }
+
+    return weightedParts[weightedParts.length - 1].fontSize;
+}
+
+function lineDominantFontSize(line: TextLine) {
+    return dominantFontSize(line.parts, line.fontSize);
+}
+
+function lineWithText(line: TextLine, text: string): TextLine {
+    return {
+        ...line,
+        text
+    };
+}
+
 // 1 ページ分の TextItem を y 座標でまとめ、TextLine に復元する。
 function buildLinesForPage(textItems: unknown[], page: number) {
     let parts = textItems
@@ -577,10 +614,11 @@ function estimateBodyFontSize(lines: TextLine[]) {
     let counts = new Map<number, number>();
 
     for (let line of lines) {
-        if (line.fontSize < 7 || line.fontSize > 12.5 || line.text.length < 20) {
+        let fontSize = lineDominantFontSize(line);
+        if (fontSize < 7 || fontSize > 12.5 || line.text.length < 20) {
             continue;
         }
-        let key = Math.round(line.fontSize * 2) / 2;
+        let key = Math.round(fontSize * 2) / 2;
         counts.set(key, (counts.get(key) ?? 0) + line.text.length);
     }
 
@@ -669,7 +707,16 @@ function estimatePageMetrics(lines: TextLine[], pages: Array<unknown[] | PDF_Pag
 
 // ページ番号など、論文本体ではない固定要素を落とす。
 function isPageDecoration(line: TextLine) {
-    return /^\d+$/.test(line.text) && line.fontSize <= 12;
+    let text = line.text.trim();
+    return (
+        /^\d+$/.test(text) && line.fontSize <= 12 ||
+        /Authorized licensed use limited to:|IEEE Xplore\. Restrictions apply\./.test(text) ||
+        /^(?:IEEE Micro|Published by the IEEE Computer Society|March\/April \d{4}|COOL CHIPS)(?:\s+|$)/.test(text) ||
+        /^0?272-1732\b/.test(text) ||
+        /^Digital Object Identifier\b/.test(text) ||
+        /^Date of publication\b/.test(text) ||
+        /^\d{1,2}\s+[A-Z][a-z]+\s+\d{4}\.?$/.test(text)
+    );
 }
 
 const CAPTION_NUMBER_PATTERN = "(?:\\d+(?:\\.\\d+)*|[IVXLCDM]+)";
@@ -707,7 +754,7 @@ function isAlgorithmCaptionLine(line: TextLine) {
 
 // 1 ページ目で本文より十分大きい行を論文タイトル候補とする。
 function isTitleLine(line: TextLine, bodyFontSize: number) {
-    return line.page == 1 && line.fontSize >= bodyFontSize + 5;
+    return line.page == 1 && lineDominantFontSize(line) >= bodyFontSize + 5;
 }
 
 function isAbstractHeading(text: string) {
@@ -863,6 +910,98 @@ function splitHeadingLines(lines: TextLine[], bodyFontSize: number) {
     return result;
 }
 
+function dropCapPart(line: TextLine, bodyFontSize: number) {
+    if (line.parts.length < 2) {
+        return null;
+    }
+
+    let first = line.parts[0];
+    if (!/^[A-Z]$/.test(first.text.trim())) {
+        return null;
+    }
+
+    let rest = partsToLine(line.parts.slice(1));
+    if (
+        !rest ||
+        first.fontSize < bodyFontSize * 2.2 ||
+        Math.abs(lineDominantFontSize(rest) - bodyFontSize) > 1.2
+    ) {
+        return null;
+    }
+
+    return {dropCap: first.text.trim(), rest};
+}
+
+function normalizeDropCaps(lines: TextLine[], bodyFontSize: number) {
+    let result = [...lines];
+
+    for (let i = 0; i < result.length; i++) {
+        let drop = dropCapPart(result[i], bodyFontSize);
+        if (!drop) {
+            continue;
+        }
+
+        let target = result
+            .filter((candidate, index) =>
+                index != i &&
+                candidate.page == result[i].page &&
+                candidate.y > result[i].y &&
+                candidate.y < result[i].y + result[i].fontSize * 1.1 &&
+                Math.abs(candidate.x - drop.rest.x) <= Math.max(8, bodyFontSize * 1.4) &&
+                Math.abs(lineDominantFontSize(candidate) - bodyFontSize) <= 1.2
+            )
+            .sort((a, b) => b.y - a.y)[0];
+
+        if (!target) {
+            continue;
+        }
+
+        let targetIndex = result.indexOf(target);
+        result[targetIndex] = lineWithText(target, drop.dropCap + target.text);
+        result[i] = drop.rest;
+    }
+
+    return result;
+}
+
+function estimateColumnSplitX(pageLines: TextLine[]) {
+    let minX = Math.min(...pageLines.map((line) => line.x));
+    let maxEnd = Math.max(...pageLines.map((line) => line.x + line.width));
+    let pageSpan = maxEnd - minX;
+    let fallback = Math.min((minX + maxEnd) / 2, Math.max(maxEnd, 612) / 2);
+    let intervals = pageLines
+        .filter((line) => line.width > 40 && line.width < pageSpan * 0.65)
+        .map((line) => ({x: line.x, end: line.x + line.width}))
+        .sort((a, b) => a.x - b.x);
+
+    if (intervals.length < 2) {
+        return fallback;
+    }
+
+    let merged: Array<{x: number; end: number}> = [];
+    for (let interval of intervals) {
+        let prev = merged[merged.length - 1];
+        if (!prev || interval.x > prev.end + 4) {
+            merged.push({...interval});
+        }
+        else {
+            prev.end = Math.max(prev.end, interval.end);
+        }
+    }
+
+    let bestGap = 0;
+    let split = fallback;
+    for (let i = 0; i + 1 < merged.length; i++) {
+        let gap = merged[i + 1].x - merged[i].end;
+        if (gap > bestGap) {
+            bestGap = gap;
+            split = (merged[i].end + merged[i + 1].x) / 2;
+        }
+    }
+
+    return bestGap >= 8 ? split : fallback;
+}
+
 // 2 段組み論文を想定し、ページごとに左カラム、右カラムの順へ並べる。
 function sortLinesForReading(lines: TextLine[]) {
     let result: TextLine[] = [];
@@ -870,8 +1009,7 @@ function sortLinesForReading(lines: TextLine[]) {
 
     for (let page of pages) {
         let pageLines = lines.filter((line) => line.page == page);
-        let maxEnd = Math.max(...pageLines.map((line) => line.x + line.width), 612);
-        let centerX = maxEnd / 2;
+        let centerX = estimateColumnSplitX(pageLines);
         let left = pageLines.filter((line) => line.x < centerX);
         let right = pageLines.filter((line) => line.x >= centerX);
         let byY = (a: TextLine, b: TextLine) => b.y - a.y || a.x - b.x;
@@ -1397,13 +1535,32 @@ function isFormulaOnlyLine(line: TextLine, columnWidth: number) {
     return /^(?:O|P|M|N|k)$/.test(text) && line.width < columnWidth * 0.08;
 }
 
+function isPullQuoteLine(line: TextLine, bodyFontSize: number) {
+    let text = line.text.trim();
+    if (isHeadingText(text)) {
+        return false;
+    }
+
+    return text.length >= 10 &&
+        text.split(/\s+/).length >= 2 &&
+        Math.abs(lineDominantFontSize(line) - bodyFontSize) <= 1.5 &&
+        /[A-Z]{2,}/.test(text) &&
+        !/[a-z]/.test(text) &&
+        /^[A-Z0-9 .,&()/§\-]+$/.test(text);
+}
+
 // 本文フォントより小さい行と記号だけの行は、図表ラベルや数式部品として扱う。
 function shouldDropStructuralFragmentLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    if (isPullQuoteLine(line, bodyFontSize)) {
+        return true;
+    }
+
     if (isCaptionLine(line) || isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize)) {
         return false;
     }
 
-    return line.fontSize < bodyFontSize - 1.2 || isFormulaOnlyLine(line, columnWidth);
+    return line.fontSize < bodyFontSize - 1.2 ||
+        isFormulaOnlyLine(line, columnWidth);
 }
 
 // キャプション継続行は、キャプション先頭と近いフォント・近い位置に出ることが多い。
@@ -2859,6 +3016,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     lines = splitHeadingLines(lines, bodyFontSize)
         .filter((line) => line.text != "")
         .filter((line) => !isPageDecoration(line));
+    lines = normalizeDropCaps(lines, bodyFontSize);
 
     // 読み順にした行から Figure/Table を先に集め、後続の本文抽出で除外できる形にする。
     let bodyLayout = estimateBodyLayout(lines, bodyFontSize, columnWidth);
