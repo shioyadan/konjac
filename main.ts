@@ -1,7 +1,6 @@
 "use strict";
 
 const ID_KONJAC = "ID_KONJAC";
-const CHROME_PDF_VIEWER_EXTENSION_ID = "mhjfbmdgcfjbbpaeojofohoefgiehjai";
 const CONTEXT_MENU_PROPS = {
     "title": "View PDF",
     "contexts": ["all"] as ["all"]
@@ -46,12 +45,12 @@ function sanitizeDownloadFileName(fileName: string) {
     return sanitized;
 }
 
-function isChromePDFViewerURL(url: URL) {
-    return url.protocol == "chrome-extension:" && url.hostname == CHROME_PDF_VIEWER_EXTENSION_ID;
+function isChromeExtensionURL(url: URL) {
+    return url.protocol == "chrome-extension:";
 }
 
-function originalURLFromChromePDFViewerURL(url: URL) {
-    if (!isChromePDFViewerURL(url)) {
+function originalURLFromChromeExtensionURL(url: URL) {
+    if (!isChromeExtensionURL(url)) {
         return "";
     }
 
@@ -63,7 +62,7 @@ function originalURLFromChromePDFViewerURL(url: URL) {
 
         try {
             let originalURL = new URL(value);
-            if (!isChromePDFViewerURL(originalURL)) {
+            if (!isChromeExtensionURL(originalURL)) {
                 return originalURL.toString();
             }
         }
@@ -82,11 +81,11 @@ function downloadableURL(urlText: string | undefined) {
 
     try {
         let url = new URL(urlText);
-        let originalURL = originalURLFromChromePDFViewerURL(url);
+        let originalURL = originalURLFromChromeExtensionURL(url);
         if (originalURL) {
             return originalURL;
         }
-        if (isChromePDFViewerURL(url)) {
+        if (isChromeExtensionURL(url)) {
             return "";
         }
         return url.toString();
