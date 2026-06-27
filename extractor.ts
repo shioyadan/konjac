@@ -721,6 +721,8 @@ function isPageDecoration(line: TextLine) {
 
 const CAPTION_NUMBER_PATTERN = "(?:\\d+(?:\\.\\d+)*|[IVXLCDM]+)";
 const CAPTION_LINE_PATTERN = new RegExp(`^(?:Figure|Fig\\.|Table)\\s+${CAPTION_NUMBER_PATTERN}(?!\\.\\d)(?:\\s*[:.]|$)`, "i");
+const FIG_DOT_CAPTION_PATTERN = new RegExp(`^Fig\\.\\s+${CAPTION_NUMBER_PATTERN}(?!\\.\\d)\\s*\\.`, "i");
+const BARE_CAPTION_LABEL_PATTERN = new RegExp(`^(?:Figure|Fig\\.|Table)\\s+${CAPTION_NUMBER_PATTERN}(?!\\.\\d)\\s*[:.]?$`, "i");
 const TABLE_CAPTION_PATTERN = new RegExp(`^Table\\s+${CAPTION_NUMBER_PATTERN}\\b`, "i");
 const ALGORITHM_CAPTION_PATTERN = /^Algorithm\s+\d+\b/i;
 
@@ -736,6 +738,7 @@ function isCaptionLine(line: TextLine, bodyFontSize?: number, columnWidth?: numb
         bodyFontSize != null &&
         columnWidth != null &&
         /^Fig\./i.test(line.text) &&
+        FIG_DOT_CAPTION_PATTERN.test(line.text) &&
         isParagraphLikeLine(line, bodyFontSize, columnWidth)
     ) {
         return false;
@@ -904,6 +907,72 @@ function splitHeadingLines(lines: TextLine[], bodyFontSize: number) {
         }
         if (body) {
             result.push(body);
+        }
+    }
+
+    return result;
+}
+
+function captionStartPartIndex(line: TextLine) {
+    for (let i = 0; i < line.parts.length; i++) {
+        if (CAPTION_LINE_PATTERN.test(partsToText(line.parts.slice(i)))) {
+            if (i == 0) {
+                return i;
+            }
+
+            let prevEnd = line.parts[i - 1].x + line.parts[i - 1].width;
+            let gap = line.parts[i].x - prevEnd;
+            if (gap >= 8) {
+                return i;
+            }
+        }
+    }
+
+    return -1;
+}
+
+function hasCaptionDescription(text: string) {
+    return !BARE_CAPTION_LABEL_PATTERN.test(text.trim());
+}
+
+function splitCaptionTailIndex(parts: TextPart[]) {
+    for (let i = 1; i < parts.length; i++) {
+        let prevEnd = parts[i - 1].x + parts[i - 1].width;
+        let gap = parts[i].x - prevEnd;
+        let captionText = partsToText(parts.slice(0, i));
+        if (gap >= 8 && captionLooksComplete(captionText) && hasCaptionDescription(captionText)) {
+            return i;
+        }
+    }
+
+    return parts.length;
+}
+
+// 別カラムの本文やコードと同じ baseline に載った図表キャプションを分離する。
+function splitCaptionLines(lines: TextLine[]) {
+    let result: TextLine[] = [];
+
+    for (let line of lines) {
+        let start = captionStartPartIndex(line);
+        if (start < 0) {
+            result.push(line);
+            continue;
+        }
+
+        let before = partsToLine(line.parts.slice(0, start));
+        let captionAndTail = line.parts.slice(start);
+        let tailStart = splitCaptionTailIndex(captionAndTail);
+        let caption = partsToLine(captionAndTail.slice(0, tailStart));
+        let after = partsToLine(captionAndTail.slice(tailStart));
+
+        if (before) {
+            result.push(before);
+        }
+        if (caption) {
+            result.push(caption);
+        }
+        if (after) {
+            result.push(after);
         }
     }
 
@@ -1215,6 +1284,41 @@ function isOpenTableCaptionContinuation(
         startsLikeParagraphContinuation(trimmed) ||
         /[.!?)]/.test(trimmed)
     );
+}
+
+function isWrappedCaptionContinuation(
+    caption: string,
+    captionLine: TextLine,
+    prevLine: TextLine,
+    nextLine: TextLine,
+    bodyFontSize: number,
+    columnWidth: number
+) {
+    if (
+        nextLine.page != captionLine.page ||
+        isLetteredSectionHeading(nextLine.text) ||
+        startsLikeNewBlock(nextLine.text) ||
+        !isTightCaptionBlockContinuation(captionLine, prevLine, nextLine, bodyFontSize)
+    ) {
+        return false;
+    }
+
+    let trimmed = nextLine.text.trim();
+    if (
+        !captionLooksComplete(caption) ||
+        prevLine.text.endsWith("-") ||
+        endsWithOpenPhrase(caption) ||
+        startsLikeParagraphContinuation(trimmed)
+    ) {
+        return true;
+    }
+
+    let sameLeftEdge = Math.abs(nextLine.x - captionLine.x) <= Math.max(6, bodyFontSize * 0.8);
+    let captionBlockWidth = Math.max(captionLine.width * 1.05, columnWidth * 1.05);
+    return sameLeftEdge &&
+        captionLine.text.length > 40 &&
+        nextLine.width > columnWidth * 0.55 &&
+        nextLine.width <= captionBlockWidth;
 }
 
 // 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
@@ -2978,7 +3082,10 @@ function collectFigureCandidates(
             let openTableCaptionContinuation =
                 tableCaption &&
                 isOpenTableCaptionContinuation(caption, line, lines[endIndex], next, bodyFontSize, columnWidth);
-            if (captionComplete && !completedCaptionBlockContinuation) {
+            let wrappedCaptionContinuation =
+                !tableCaption &&
+                isWrappedCaptionContinuation(caption, line, lines[endIndex], next, bodyFontSize, columnWidth);
+            if (captionComplete && !completedCaptionBlockContinuation && !wrappedCaptionContinuation) {
                 break;
             }
 
@@ -2998,6 +3105,7 @@ function collectFigureCandidates(
                 isTitleLine(next, bodyFontSize) ||
                 isHeadingLine(next, bodyFontSize) ||
                 !openTableCaptionContinuation &&
+                    !wrappedCaptionContinuation &&
                     !isLikelyCaptionContinuationLine(line, lines[endIndex], next, bodyFontSize, columnWidth)
             ) {
                 break;
@@ -3111,7 +3219,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let figureColumnWidth = Math.max(columnWidth, Math.min(pageColumnWidth, 280));
 
     // 行単位の前処理: 見出し分割とページ番号除去を行う。小さい図表内テキストは矩形推定で使うため残す。
-    lines = splitHeadingLines(lines, bodyFontSize)
+    lines = splitCaptionLines(splitHeadingLines(lines, bodyFontSize))
         .filter((line) => line.text != "")
         .filter((line) => !isPageDecoration(line));
     lines = normalizeDropCaps(lines, bodyFontSize);
