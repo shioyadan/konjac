@@ -1071,6 +1071,71 @@ function estimateColumnSplitX(pageLines: TextLine[]) {
     return bestGap >= 8 ? split : fallback;
 }
 
+function pageLooksTwoColumn(pageLines: TextLine[], splitX: number) {
+    let leftLines = pageLines.filter((line) =>
+        line.x < splitX - 20 &&
+        line.x + line.width < splitX + 18 &&
+        line.text.length > 20
+    );
+    let rightLines = pageLines.filter((line) =>
+        line.x > splitX + 6 &&
+        line.text.length > 20
+    );
+
+    return leftLines.length >= 3 && rightLines.length >= 3;
+}
+
+function splitMergedColumnLine(line: TextLine, splitX: number): TextLine[] {
+    if (
+        line.parts.length < 2 ||
+        line.fontSize > 14 ||
+        line.x >= splitX - 4 ||
+        line.x + line.width <= splitX + 6
+    ) {
+        return [line];
+    }
+
+    for (let i = 1; i < line.parts.length; i++) {
+        let prevEnd = line.parts[i - 1].x + line.parts[i - 1].width;
+        let gap = line.parts[i].x - prevEnd;
+        if (
+            gap >= 8 &&
+            prevEnd <= splitX + 10 &&
+            line.parts[i].x >= splitX - 10
+        ) {
+            let before = partsToLine(line.parts.slice(0, i));
+            let after = partsToLine(line.parts.slice(i));
+            return [
+                ...(before ? [before] : []),
+                ...(after ? splitMergedColumnLine(after, splitX) : [])
+            ];
+        }
+    }
+
+    return [line];
+}
+
+// 同一 baseline にある左右カラムの行が PDF text item 上で近すぎる場合だけ分離する。
+function splitMergedColumnLines(lines: TextLine[]) {
+    let result: TextLine[] = [];
+    let pages = [...new Set(lines.map((line) => line.page))].sort((a, b) => a - b);
+
+    for (let page of pages) {
+        let pageLines = lines.filter((line) => line.page == page);
+        let splitX = estimateColumnSplitX(pageLines);
+        if (!pageLooksTwoColumn(pageLines, splitX)) {
+            result.push(...pageLines);
+            continue;
+        }
+
+        for (let line of pageLines) {
+            result.push(...splitMergedColumnLine(line, splitX));
+        }
+    }
+
+    return result;
+}
+
 // 2 段組み論文を想定し、ページごとに左カラム、右カラムの順へ並べる。
 function sortLinesForReading(lines: TextLine[]) {
     let result: TextLine[] = [];
@@ -1827,6 +1892,13 @@ function lineNearGraphics(line: TextLine, graphics: PDF_GraphicObject[], metric:
         usefulGraphicObject(graphic, metric) &&
         rectsOverlap(box, expandRect(graphic, Math.max(4, graphic.strokeWidth ?? 1), metric))
     );
+}
+
+function isAlgorithmCodeLine(line: TextLine) {
+    let text = line.text.trim();
+    return /^\d+\s+\S/.test(text) ||
+        /^(?:Input:|Output:|Function\b|foreach\b|if\b|return\b|continue\b)/.test(text) ||
+        /^(?:[A-Za-z_]\w*|[A-Z])\s*←/.test(text);
 }
 
 function graphicExcludedByCaption(graphic: PDF_GraphicObject, captionLines: TextLine[], metric: PageMetrics) {
@@ -2983,7 +3055,7 @@ function estimateAlgorithmRect(
         }
 
         let gap = lastY - line.y;
-        if (gap > gapLimit) {
+        if (gap > gapLimit && !isAlgorithmCodeLine(line)) {
             break;
         }
 
@@ -3198,6 +3270,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     // TextItem をページごとの行へ復元し、文書全体の本文らしいサイズを推定する。
     let lines = pages.flatMap((page, index) => buildLinesForPage(pageItems(page), index + 1));
     let graphics = pages.flatMap((page) => pageGraphics(page));
+    lines = splitMergedColumnLines(lines);
     let bodyFontSize = estimateBodyFontSize(lines);
 
     // 本文幅の代表値を使って、カラム移動や短い行による段落切れを判定する。
