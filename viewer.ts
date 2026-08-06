@@ -155,19 +155,37 @@ function show(nodes: PDF_Node[]) {
 }
 
 function load(fileName: string) {
+    let progress = document.getElementById("progress") as HTMLProgressElement | null;
+    if (progress) {
+        progress.hidden = false;
+    }
     let loadingTask = pdfjsLib.getDocument({
         url: fileName,
         cMapPacked: true,
         cMapUrl: "cmaps/"   // 日本語（や他の言語）を表示するために必要なマップファイル．Makefile で dist にコピーされる
     });
 
+    loadingTask.onProgress = ({loaded, total}: {loaded: number; total: number}) => {
+        if (progress && total > 0) {
+            progress.max = total;
+            progress.value = loaded;
+        }
+    };
+
     loadingTask.promise.then(async (pdf) => {
+        if (progress) {
+            progress.max = pdf.numPages;
+            progress.value = 0;
+        }
         let pages: PDF_PageInput[] = [];
         let pageProxies: any[] = [];
         for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
             let page = await pdf.getPage(pageNumber);
             pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>));
             pageProxies.push(page);
+            if (progress) {
+                progress.value = pageNumber;
+            }
         }
         let nodes = extractNodesFromPages(pages);
         await attachFigureImages(nodes, pageProxies);
