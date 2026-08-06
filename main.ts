@@ -54,20 +54,36 @@ function originalURLFromChromeExtensionURL(url: URL) {
         return "";
     }
 
-    for (let key of ["src", "file", "url"]) {
-        let value = url.searchParams.get(key);
-        if (!value) {
-            continue;
-        }
-
+    let originalURL = (value: string) => {
         try {
-            let originalURL = new URL(value);
-            if (!isChromeExtensionURL(originalURL)) {
-                return originalURL.toString();
+            let parsedURL = new URL(value);
+            if (!isChromeExtensionURL(parsedURL)) {
+                return parsedURL.toString();
             }
         }
         catch {
-            continue;
+            return "";
+        }
+        return "";
+    };
+
+    for (let key of ["src", "file", "url"]) {
+        let value = url.searchParams.get(key);
+        if (value) {
+            let parsedURL = originalURL(value);
+            if (parsedURL) {
+                return parsedURL;
+            }
+        }
+    }
+
+    // Chrome の PDF viewer は元 URL を名前なしの query として保持する場合がある。
+    // 例: chrome-extension://.../index.html?file:///C:/path/document.pdf
+    let rawQuery = url.search.slice(1);
+    for (let value of [rawQuery, safeDecodeURIComponent(rawQuery)]) {
+        let parsedURL = originalURL(value);
+        if (parsedURL) {
+            return parsedURL;
         }
     }
 
@@ -191,6 +207,21 @@ function filePathToURL(filePath: string) {
     return normalized;
 }
 
+function isLocalFileURL(urlText: string) {
+    try {
+        return new URL(urlText).protocol == "file:";
+    }
+    catch {
+        return false;
+    }
+}
+
+function viewerTabURL(viewerURL: string, pdfURL: string) {
+    let url = new URL(viewerURL);
+    url.searchParams.set("file", pdfURL);
+    return url.toString();
+}
+
 function main() {
     // service worker が再起動しても同じ id のメニューを重複作成しない。
     createContextMenu();
@@ -204,6 +235,15 @@ function main() {
 
             if (!orgURL) {
                 console.log("Invalid URL", {info, tabURL: tab?.url});
+                return;
+            }
+
+            // 既にローカルにある PDF は再ダウンロードしない。同じ Downloads 内へ
+            // 保存し直すと、元の名前に (2) などが付いたファイルで衝突し得る。
+            if (isLocalFileURL(orgURL)) {
+                const tabURL = viewerTabURL(viewerURL, orgURL);
+                chrome.tabs.create({url: tabURL});
+                console.log(`Open a new tab: ${tabURL}`);
                 return;
             }
 
@@ -224,8 +264,8 @@ function main() {
                         console.warn(`Downloaded PDF not found: ${id}`);
                         return;
                     }
-                    const pdfURL = encodeURIComponent(filePathToURL(result[0].filename));
-                    const tabURL = `${viewerURL}?file=${pdfURL}`;
+                    const pdfURL = filePathToURL(result[0].filename);
+                    const tabURL = viewerTabURL(viewerURL, pdfURL);
                     chrome.tabs.create({url: tabURL});
                     console.log(`Open a new tab: ${tabURL}`);
                 }
