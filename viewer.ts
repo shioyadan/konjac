@@ -154,6 +154,55 @@ function show(nodes: PDF_Node[]) {
 
 }
 
+function htmlFileName(pdfURL: string) {
+    let path = pdfURL;
+    try {
+        path = new URL(pdfURL).pathname;
+    }
+    catch {
+        // URL でない場合は入力をパスとして扱う。
+    }
+
+    let name = path.split(/[\\/]/).pop() || "document";
+    try {
+        name = decodeURIComponent(name);
+    }
+    catch {
+        // 不正な percent encoding はそのままファイル名に使う。
+    }
+    return `${name.replace(/\.pdf$/i, "") || "document"}.html`;
+}
+
+function exportHTML(pdfURL: string) {
+    let exported = document.documentElement.cloneNode(true) as HTMLElement;
+    exported.querySelectorAll("script, #export-controls").forEach((element) => element.remove());
+
+    let fileName = htmlFileName(pdfURL);
+    let title = exported.querySelector("title");
+    if (title) {
+        title.textContent = fileName.replace(/\.html$/i, "");
+    }
+
+    let blobURL = URL.createObjectURL(new Blob(
+        ["<!DOCTYPE html>\n", exported.outerHTML],
+        {type: "text/html;charset=utf-8"}
+    ));
+    let link = document.createElement("a");
+    link.href = blobURL;
+    link.download = fileName;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(blobURL));
+}
+
+function enableHTMLExport(pdfURL: string) {
+    let controls = document.getElementById("export-controls");
+    let button = document.getElementById("export-html");
+    if (controls && button instanceof HTMLButtonElement) {
+        controls.hidden = false;
+        button.onclick = () => exportHTML(pdfURL);
+    }
+}
+
 function load(fileName: string) {
     let progress = document.getElementById("progress") as HTMLProgressElement | null;
     if (progress) {
@@ -190,6 +239,7 @@ function load(fileName: string) {
         let nodes = extractNodesFromPages(pages);
         await attachFigureImages(nodes, pageProxies);
         show(nodes);
+        enableHTMLExport(fileName);
     });
 }
 
