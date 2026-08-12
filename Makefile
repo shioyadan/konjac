@@ -2,13 +2,17 @@ PDF ?= work/test.pdf
 OUT ?= work/test.html
 JSON_OUT ?= work/test.json
 
-.PHONY: all extension-build web-build cli-build cli cli-json init clean distclean
+.PHONY: all typecheck extension-build web-build cli-build package cli cli-json init clean distclean
 
 # 拡張版はCMapをディレクトリとして同梱し、Web版は単一HTMLへ埋め込む
 all: extension-build web-build cli-build
 
+typecheck:
+	npx tsc --noEmit
+	npx tsc --project jsconfig.json --noEmit
+
 extension-build:
-	npx webpack --config=webpack.config.cjs
+	npx webpack --config=webpack.config.cjs --mode=production
 	mkdir -p dist/extension/cmaps
 	cp -r node_modules/pdfjs-dist/cmaps/. dist/extension/cmaps
 	cp src/extension/manifest.json dist/extension/manifest.json
@@ -16,6 +20,12 @@ extension-build:
 
 web-build:
 	npx webpack --config=webpack.web.config.cjs --mode=production
+
+# Web版とChrome拡張を、そのまま配布できる独立したZIPにする
+package: extension-build web-build
+	mkdir -p dist/packages
+	cd dist/web && zip -q -r -FS ../packages/konjac-web.zip .
+	cd dist/extension && zip -q -r -FS ../packages/konjac-extension.zip .
 
 cli-build:
 	npx webpack --config=webpack.cli.config.cjs

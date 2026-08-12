@@ -1,44 +1,32 @@
-// __dirname 等を使うために，.cjs になっている
+// Chrome拡張向けのバンドル設定
 
-module.exports = {
-    // 入力ファイル
-    entry: {
-        viewer: "./src/extension/viewer.ts",
-        main: "./src/extension/main.ts"
-    },
-    output: {
-        // 出力先
-        path: `${__dirname}/dist/extension`,
-        // 生成済みファイルから参照される時のパス
-        publicPath: "auto",
-        // 生成ファイル
-        filename: "[name].js",
-        clean: true,
-        // 出力フォーマット
-        // library: "external_modules",
-        // libraryTarget: "umd",
-    },
+module.exports = (_env, argv) => {
+    const isProduction = argv.mode === "production";
 
-    // ブラウザ 向け
-    target: "web",
-
-    module: {
-        rules: [
-            {   // Typescript
-                test: /\.ts$/,
-                use: "ts-loader"
-            }
-        ]
-    },
-
-    resolve: {
-        extensions: [".ts", ".js"]
-    },
-
-    // 開発バージョン
-    //mode: "production",
-    mode: "development",
-
-    // Source map の有効化
-    devtool: 'inline-source-map'
+    return {
+        entry: {
+            viewer: "./src/extension/viewer.ts",
+            main: "./src/extension/main.ts"
+        },
+        output: {
+            path: `${__dirname}/dist/extension`,
+            publicPath: "auto",
+            filename: "[name].js",
+            clean: true
+        },
+        target: "web",
+        module: {
+            rules: [
+                {
+                    test: /\.ts$/,
+                    use: "ts-loader"
+                }
+            ]
+        },
+        resolve: {
+            extensions: [".ts", ".js"]
+        },
+        mode: isProduction ? "production" : "development",
+        devtool: isProduction ? false : "inline-source-map"
+    };
 };

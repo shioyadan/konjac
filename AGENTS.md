@@ -18,6 +18,7 @@ PDF.js で PDF の text content と描画オブジェクトを取り出し、タ
 - `src/cli/`: Chrome を使わず、同じ抽出エンジンで HTML/JSON/debug 出力を作る CLI。
 - `src/web/`: ローカルPDFを表示し、WorkerとCMapを単一HTMLへ埋め込むWeb版。
 - `Makefile`: 拡張ビルド、CLI ビルド、CLI 変換の入口。
+- `.github/workflows/build.yml`: 型検査、Web版・拡張版のZIP生成、GitHub PagesとReleaseへの配置。
 - `work/`: 手元検証用の PDF と変換結果。大量の一時出力はなるべく `/tmp` を使う。
 - `dist/`: webpack の出力。`extension`、`web`、`cli` 以下へ用途別に生成される。
 
@@ -38,6 +39,7 @@ make cli PDF="$PDF" OUT="${PDF%.pdf}.current.html"
 make cli-json PDF="$PDF" JSON_OUT="${PDF%.pdf}.current.json"
 npx tsc --noEmit
 make
+make package
 ```
 
 `make cli` は HTML を出す。図表画像も埋め込むので、見た目の確認に使う。
