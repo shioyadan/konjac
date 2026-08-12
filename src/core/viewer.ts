@@ -67,7 +67,9 @@ const pdfSourceLocations = new WeakMap<HTMLElement, PDFSourceLocation>();
 const pdfSourcePageImages = new WeakMap<object, Promise<PDFSourcePageImage | null>>();
 let pdfSelectionButton: HTMLButtonElement | null = null;
 let selectedPDFSources: PDFSourceLocation[] = [];
+let selectedPDFElements: HTMLElement[] = [];
 let selectedPDFAnchor: HTMLElement | null = null;
+let selectedPDFRange: Range | null = null;
 
 async function renderPageCanvas(page: any, scale = FIGURE_RENDER_SCALE) {
     let viewport = page.getViewport({scale});
@@ -396,6 +398,97 @@ function layoutPDFSourcePage(
     highlight.style.height = `${rect.height * scale}px`;
 }
 
+function enablePDFSourceRegionEditing(
+    pageElement: HTMLElement,
+    highlight: HTMLElement,
+    page: PDFSourcePageImage,
+    rect: PDF_Rect
+) {
+    let pointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    let syncRect = () => {
+        let zoom = pageElement.clientWidth / page.width;
+        let scale = page.scale * zoom;
+        if (scale <= 0) {
+            return;
+        }
+
+        let width = Math.min(highlight.offsetWidth, pageElement.clientWidth);
+        let height = Math.min(highlight.offsetHeight, pageElement.clientHeight);
+        let left = Math.max(0, Math.min(highlight.offsetLeft, pageElement.clientWidth - width));
+        let top = Math.max(0, Math.min(highlight.offsetTop, pageElement.clientHeight - height));
+        if (left != highlight.offsetLeft) {
+            highlight.style.left = `${left}px`;
+        }
+        if (top != highlight.offsetTop) {
+            highlight.style.top = `${top}px`;
+        }
+        if (width != highlight.offsetWidth) {
+            highlight.style.width = `${width}px`;
+        }
+        if (height != highlight.offsetHeight) {
+            highlight.style.height = `${height}px`;
+        }
+
+        rect.x = left / scale;
+        rect.width = width / scale;
+        rect.height = height / scale;
+        rect.y = page.pageHeight - (top + height) / scale;
+    };
+
+    new ResizeObserver(syncRect).observe(highlight);
+    highlight.onpointerdown = (event) => {
+        event.stopPropagation();
+        let bounds = highlight.getBoundingClientRect();
+        let onResizeHandle = event.clientX >= bounds.right - 18 && event.clientY >= bounds.bottom - 18;
+        if (event.button != 0 || onResizeHandle) {
+            return;
+        }
+
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        startLeft = highlight.offsetLeft;
+        startTop = highlight.offsetTop;
+        highlight.setPointerCapture(pointerId);
+        highlight.classList.add("dragging");
+        event.preventDefault();
+    };
+    highlight.onpointermove = (event) => {
+        if (pointerId != event.pointerId) {
+            return;
+        }
+        let left = Math.max(0, Math.min(
+            startLeft + event.clientX - startX,
+            pageElement.clientWidth - highlight.offsetWidth
+        ));
+        let top = Math.max(0, Math.min(
+            startTop + event.clientY - startY,
+            pageElement.clientHeight - highlight.offsetHeight
+        ));
+        highlight.style.left = `${left}px`;
+        highlight.style.top = `${top}px`;
+        syncRect();
+    };
+    let stopDragging = (event: PointerEvent) => {
+        if (pointerId != event.pointerId) {
+            return;
+        }
+        if (highlight.hasPointerCapture(pointerId)) {
+            highlight.releasePointerCapture(pointerId);
+        }
+        pointerId = null;
+        highlight.classList.remove("dragging");
+        syncRect();
+    };
+    highlight.onpointerup = stopDragging;
+    highlight.onpointercancel = stopDragging;
+}
+
 function enablePDFSourceZoom(
     viewport: HTMLElement,
     pageElement: HTMLElement,
@@ -427,7 +520,7 @@ function enablePDFSourceZoom(
         layoutPDFSourcePage(pageElement, image, highlight, page, rect, zoom);
         viewport.scrollLeft = contentX * ratio - pointerX;
         viewport.scrollTop = contentY * ratio - pointerY;
-        label.textContent = `Page ${rect.page} · ${Math.round(zoom * 100)}% · Drag to move · Ctrl+wheel to zoom`;
+        label.textContent = `Page ${rect.page} · ${Math.round(zoom * 100)}% · Drag page · Adjust box · Ctrl+wheel to zoom`;
     }, {passive: false});
 }
 
@@ -438,7 +531,7 @@ function centerPDFSource(viewport: HTMLElement, page: PDFSourcePageImage, rect: 
     viewport.scrollTop = centerY - viewport.clientHeight / 2;
 }
 
-async function createPDFSourcePreview(source: PDFSourceLocation) {
+async function createPDFSourcePreview(source: PDFSourceLocation, inlineElement?: HTMLElement) {
     let pageImage = await sourcePageImage(source.page);
     if (!pageImage) {
         throw new Error("Could not render the source PDF area");
@@ -466,11 +559,32 @@ async function createPDFSourcePreview(source: PDFSourceLocation) {
     pageElement.append(image, highlight);
     viewport.appendChild(pageElement);
     let pageLabel = document.createElement("small");
-    pageLabel.textContent = `Page ${source.rect.page} · 100% · Drag to move · Ctrl+wheel to zoom`;
+    let pageStatus = document.createElement("span");
+    pageStatus.textContent = `Page ${source.rect.page} · 100% · Drag page · Adjust box · Ctrl+wheel to zoom`;
+    pageLabel.appendChild(pageStatus);
+    if (inlineElement) {
+        let showImage = document.createElement("button");
+        showImage.type = "button";
+        showImage.className = "text-button";
+        showImage.textContent = "Show image";
+        showImage.onclick = async () => {
+            showImage.disabled = true;
+            showImage.textContent = "Loading image…";
+            try {
+                await showPDFImagesInline(null, [inlineElement], [source], preview);
+            }
+            catch (error) {
+                console.warn("Failed to show the PDF area inline", error);
+                showImage.textContent = "Image unavailable";
+            }
+        };
+        pageLabel.appendChild(showImage);
+    }
     preview.append(viewport, pageLabel);
     layoutPDFSourcePage(pageElement, image, highlight, pageImage, source.rect, 1);
     enableDragScrolling(viewport);
-    enablePDFSourceZoom(viewport, pageElement, image, highlight, pageImage, source.rect, pageLabel);
+    enablePDFSourceRegionEditing(pageElement, highlight, pageImage, source.rect);
+    enablePDFSourceZoom(viewport, pageElement, image, highlight, pageImage, source.rect, pageStatus);
     requestAnimationFrame(() => centerPDFSource(viewport, pageImage, source.rect));
     return preview;
 }
@@ -484,7 +598,112 @@ function combinedPDFSource(sources: PDFSourceLocation[]) {
     return {page: first.page, rect: {page: first.rect.page, x, y, width: right - x, height: top - y}};
 }
 
-async function showPDFSelection(sources: PDFSourceLocation[], anchor: HTMLElement) {
+function selectedSourceBlocks(elements: HTMLElement[]) {
+    return [...new Set(elements.map((element) =>
+        element.closest<HTMLElement>("#main > *") ?? element
+    ))];
+}
+
+async function cropPDFSourcePage(page: PDFSourcePageImage, rect: PDF_Rect) {
+    let image = new Image();
+    image.src = page.src;
+    await image.decode();
+
+    let scale = page.scale;
+    let sourceX = Math.max(0, Math.floor(rect.x * scale));
+    let sourceY = Math.max(0, Math.floor((page.pageHeight - rect.y - rect.height) * scale));
+    let sourceWidth = Math.min(page.width - sourceX, Math.ceil(rect.width * scale));
+    let sourceHeight = Math.min(page.height - sourceY, Math.ceil(rect.height * scale));
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+        return "";
+    }
+
+    let crop = document.createElement("canvas");
+    crop.width = sourceWidth;
+    crop.height = sourceHeight;
+    let context = crop.getContext("2d");
+    if (!context) {
+        return "";
+    }
+    context.fillStyle = "white";
+    context.fillRect(0, 0, sourceWidth, sourceHeight);
+    context.drawImage(
+        image,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        sourceWidth,
+        sourceHeight
+    );
+    return crop.toDataURL("image/png");
+}
+
+async function showPDFImagesInline(
+    range: Range | null,
+    elements: HTMLElement[],
+    sources: PDFSourceLocation[],
+    panel: HTMLElement
+) {
+    let images = await Promise.all(sources.map(async (source) => {
+        let page = await sourcePageImage(source.page);
+        if (!page) {
+            throw new Error("Could not render the selected source PDF area");
+        }
+        let src = await cropPDFSourcePage(page, source.rect);
+        if (!src) {
+            throw new Error("Could not crop the selected source PDF area");
+        }
+        let image = document.createElement("img");
+        image.className = "pdf-inline-source-image";
+        image.src = src;
+        image.alt = `Original PDF image from page ${source.rect.page}`;
+        return image;
+    }));
+
+    let replacement = document.createElement("span");
+    replacement.className = "pdf-inline-source";
+    replacement.append(...images);
+    let restore = document.createElement("button");
+    restore.type = "button";
+    restore.className = "text-button pdf-inline-restore";
+    restore.textContent = "Show HTML";
+    restore.dataset.exportExclude = "";
+    replacement.appendChild(restore);
+
+    let exactInlineRange =
+        range != null &&
+        elements.length == 1 &&
+        elements[0].contains(range.startContainer) &&
+        elements[0].contains(range.endContainer);
+    panel.remove();
+    window.getSelection()?.removeAllRanges();
+    if (exactInlineRange && range) {
+        let original = range.extractContents();
+        range.insertNode(replacement);
+        restore.onclick = () => replacement.replaceWith(original);
+        return;
+    }
+
+    let blocks = selectedSourceBlocks(elements);
+    let hiddenStates = blocks.map((block) => block.hidden);
+    replacement.classList.add("pdf-inline-source-block");
+    blocks[0].insertAdjacentElement("beforebegin", replacement);
+    blocks.forEach((block) => block.hidden = true);
+    restore.onclick = () => {
+        blocks.forEach((block, index) => block.hidden = hiddenStates[index]);
+        replacement.remove();
+    };
+}
+
+async function showPDFSelection(
+    sources: PDFSourceLocation[],
+    elements: HTMLElement[],
+    anchor: HTMLElement,
+    range: Range
+) {
     document.querySelector(".pdf-selection-preview")?.remove();
 
     let panel = document.createElement("section");
@@ -492,12 +711,19 @@ async function showPDFSelection(sources: PDFSourceLocation[], anchor: HTMLElemen
     panel.dataset.exportExclude = "";
     let header = document.createElement("header");
     header.textContent = "PDF selection";
+    let actions = document.createElement("span");
+    let showImage = document.createElement("button");
+    showImage.type = "button";
+    showImage.className = "text-button";
+    showImage.textContent = "Show image";
+    showImage.disabled = true;
     let close = document.createElement("button");
     close.type = "button";
     close.className = "text-button";
     close.textContent = "Close";
     close.onclick = () => panel.remove();
-    header.appendChild(close);
+    actions.append(showImage, close);
+    header.appendChild(actions);
     panel.appendChild(header);
     anchor.insertAdjacentElement("afterend", panel);
 
@@ -508,13 +734,26 @@ async function showPDFSelection(sources: PDFSourceLocation[], anchor: HTMLElemen
         byPage.set(source.rect.page, pageSources);
     }
 
+    let combinedSources = [...byPage.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([, pageSources]) => combinedPDFSource(pageSources));
     try {
         let previews = await Promise.all(
-            [...byPage.entries()]
-                .sort(([a], [b]) => a - b)
-                .map(([, pageSources]) => createPDFSourcePreview(combinedPDFSource(pageSources)))
+            combinedSources.map((source) => createPDFSourcePreview(source))
         );
         panel.append(...previews);
+        showImage.disabled = false;
+        showImage.onclick = async () => {
+            showImage.disabled = true;
+            showImage.textContent = "Loading image…";
+            try {
+                await showPDFImagesInline(range, elements, combinedSources, panel);
+            }
+            catch (error) {
+                console.warn("Failed to show the selected PDF areas inline", error);
+                showImage.textContent = "Image unavailable";
+            }
+        };
     }
     catch (error) {
         console.warn("Failed to render the selected PDF areas", error);
@@ -555,7 +794,9 @@ function updatePDFSelection() {
     selectedPDFSources = selected
         .map((element) => pdfSourceLocations.get(element))
         .filter((source): source is PDFSourceLocation => source != null);
+    selectedPDFElements = selected;
     selectedPDFAnchor = selected[selected.length - 1].closest<HTMLElement>("#main > *") ?? selected[selected.length - 1];
+    selectedPDFRange = range.cloneRange();
 
     let rects = range.getClientRects();
     let rect = rects[rects.length - 1] ?? range.getBoundingClientRect();
@@ -582,14 +823,16 @@ function enablePDFSelection() {
     button.onpointerdown = (event) => event.preventDefault();
     button.onclick = async () => {
         let sources = [...selectedPDFSources];
+        let elements = [...selectedPDFElements];
         let anchor = selectedPDFAnchor;
+        let range = selectedPDFRange?.cloneRange();
         button.hidden = true;
-        if (!anchor || sources.length == 0) {
+        if (!anchor || !range || sources.length == 0 || elements.length == 0) {
             return;
         }
         button.disabled = true;
         button.textContent = "Loading PDF…";
-        await showPDFSelection(sources, anchor);
+        await showPDFSelection(sources, elements, anchor, range);
         button.textContent = "PDF selection";
         button.disabled = false;
     };
@@ -622,7 +865,7 @@ function attachPDFSourceToggle(element: HTMLElement) {
         toggle.disabled = true;
         toggle.textContent = "Loading PDF…";
         try {
-            preview = await createPDFSourcePreview(source);
+            preview = await createPDFSourcePreview(source, element);
             if (element.tagName == "FIGCAPTION" && element.parentElement) {
                 element.parentElement.insertBefore(preview, element);
             }
