@@ -488,7 +488,12 @@ function attachPDFSourceToggle(element: HTMLElement) {
             let pageLabel = document.createElement("small");
             pageLabel.textContent = `Page ${source.rect.page} · 100% · Drag to move · Ctrl+wheel to zoom`;
             preview.append(viewport, pageLabel);
-            element.appendChild(preview);
+            if (element.tagName == "FIGCAPTION" && element.parentElement) {
+                element.parentElement.insertBefore(preview, element);
+            }
+            else {
+                element.appendChild(preview);
+            }
             layoutPDFSourcePage(pageElement, image, highlight, pageImage, source.rect, 1);
             enableDragScrolling(viewport);
             enablePDFSourceZoom(viewport, pageElement, image, highlight, pageImage, source.rect, pageLabel);
