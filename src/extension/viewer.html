@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Konjac</title>
     <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body { margin: 0; color: #212529; background: #fff; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-size: 1rem; font-weight: 400; line-height: 1.5; text-align: left; -webkit-text-size-adjust: 100%; }
+        h1, h2, h3, h4 { margin: 0 0 0.5rem; font-weight: 500; line-height: 1.2; }
+        h1 { font-size: calc(1.375rem + 1.5vw); }
+        h2 { font-size: calc(1.325rem + 0.9vw); }
+        h3 { font-size: calc(1.3rem + 0.6vw); }
+        h4 { font-size: calc(1.275rem + 0.3vw); }
+        p { margin: 0 0 1rem; }
+        small { font-size: 0.875em; }
+        a { color: #0d6efd; text-decoration: underline; }
+        button { margin: 0; font: inherit; }
+        .viewer-container { width: 100%; margin-inline: auto; padding-inline: 0.75rem; }
+        .viewer-row { display: flex; flex-wrap: wrap; margin-inline: -0.75rem; }
+        .viewer-row > * { flex-shrink: 0; width: 100%; max-width: 100%; padding-inline: 0.75rem; }
         #document-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
         #translation-controls { display: inline-flex; align-items: center; gap: 0.75rem; }
         #document-controls[hidden], #translation-controls[hidden] { display: none; }
@@ -14,15 +28,29 @@
         .translatable:hover > .translation-toggle, .translation-toggle:focus { opacity: 1; }
         .translation-alternative { display: block; margin-top: 0.35rem; }
         @media (hover: none) { .translation-toggle { opacity: 0.6; } }
+        @media (min-width: 768px) {
+            .viewer-container { max-width: 720px; }
+            .viewer-side { width: 16.666667%; }
+            .viewer-main { width: 66.666667%; }
+        }
+        @media (min-width: 992px) { .viewer-container { max-width: 960px; } }
+        @media (min-width: 1200px) {
+            .viewer-container { max-width: 1140px; }
+            h1 { font-size: 2.5rem; }
+            h2 { font-size: 2rem; }
+            h3 { font-size: 1.75rem; }
+            h4 { font-size: 1.5rem; }
+        }
+        @media (min-width: 1400px) { .viewer-container { max-width: 1320px; } }
     </style>
     <script type="module" src="viewer.js"></script>
 </head>
 <body>
-    <div class="container-md">
-        <div class="row">
+    <div class="viewer-container">
+        <div class="viewer-row">
             <!-- md サイズ以上の場合に，2:8:2 で div を配置 -->
-            <div class="col-md-2"></div>
-            <div class="col-md-8">
+            <div class="viewer-side"></div>
+            <div class="viewer-main">
                 <div id="document-controls" data-export-exclude hidden>
                     <span id="translation-controls" hidden>
                         <button id="translate-document" type="button" class="text-button">Translate to Japanese</button>
@@ -34,7 +62,7 @@
                 <progress id="progress" data-export-exclude aria-label="Loading PDF" hidden style="width: 100%; height: 2px; margin-top: 1rem; border: 0; border-radius: 0; accent-color: #0d6efd"></progress>
                 <div id="main"></div>
             </div>
-            <div class="col-md-2"></div>
+            <div class="viewer-side"></div>
         </div>
     </div>
 
