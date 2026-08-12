@@ -4,6 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Konjac</title>
+    <style>
+        #document-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
+        #translation-controls { display: inline-flex; align-items: center; gap: 0.75rem; }
+        #document-controls[hidden], #translation-controls[hidden] { display: none; }
+        .text-button { padding: 0; border: 0; background: none; color: #0d6efd; font: inherit; }
+        .text-button:hover, .text-button:focus { text-decoration: underline; }
+        .translation-toggle { margin-left: 0.4rem; font-size: 0.72rem; opacity: 0; }
+        .translatable:hover > .translation-toggle, .translation-toggle:focus { opacity: 1; }
+        .translation-alternative { display: block; margin-top: 0.35rem; }
+        @media (hover: none) { .translation-toggle { opacity: 0.6; } }
+    </style>
     <script type="module" src="dist/viewer.js"></script>
 </head>
 <body>
@@ -13,12 +24,16 @@
             <!-- md サイズ以上の場合に，2:8:2 で div を配置 -->
             <div class="col-md-2"></div>
             <div class="col-md-8">
-                <div id="export-controls" hidden style="margin-top: 1rem; text-align: right">
-                    <button id="export-html" type="button" class="btn btn-sm btn-outline-primary">Export HTML</button>
+                <div id="document-controls" hidden>
+                    <span id="translation-controls" hidden>
+                        <button id="translate-document" type="button" class="text-button">Translate to Japanese</button>
+                        <button id="toggle-document-originals" type="button" class="text-button" hidden>Show originals</button>
+                        <small id="translation-status" aria-live="polite"></small>
+                    </span>
+                    <button id="export-html" type="button" class="text-button">Export HTML</button>
                 </div>
-                <div id="main">
-                    <progress id="progress" aria-label="Loading PDF" hidden style="width: 100%; height: 2px; margin-top: 1rem; border: 0; border-radius: 0; accent-color: #0d6efd"></progress>
-                </div>
+                <progress id="progress" aria-label="Loading PDF" hidden style="width: 100%; height: 2px; margin-top: 1rem; border: 0; border-radius: 0; accent-color: #0d6efd"></progress>
+                <div id="main"></div>
             </div>
             <div class="col-md-2"></div>
         </div>

@@ -22,6 +22,26 @@ console.log("initialized.");
 
 const FIGURE_RENDER_SCALE = 4.0;
 
+interface ChromeTranslator {
+    translate(text: string): Promise<string>;
+    destroy?(): void;
+}
+
+interface ChromeTranslatorFactory {
+    availability(options: {sourceLanguage: string; targetLanguage: string}): Promise<string>;
+    create(options: {
+        sourceLanguage: string;
+        targetLanguage: string;
+        monitor(monitor: EventTarget): void;
+    }): Promise<ChromeTranslator>;
+}
+
+declare global {
+    interface Window {
+        Translator?: ChromeTranslatorFactory;
+    }
+}
+
 interface RenderedPageCanvas {
     canvas: HTMLCanvasElement;
     pageHeight: number;
@@ -173,9 +193,27 @@ function htmlFileName(pdfURL: string) {
     return `${name.replace(/\.pdf$/i, "") || "document"}.html`;
 }
 
+function exportedTranslationContent(exported: HTMLElement) {
+    for (let element of exported.querySelectorAll<HTMLElement>(".translatable")) {
+        let original = element.querySelector<HTMLElement>(":scope > .translation-original");
+        let translated = element.querySelector<HTMLElement>(":scope > .translation-japanese");
+        let content = translated
+            ? Array.from(translated.childNodes).map((node) => node.cloneNode(true))
+            : [];
+        if (original && !original.hidden) {
+            let originalCopy = original.cloneNode(true) as HTMLElement;
+            originalCopy.className = "translation-alternative";
+            content.push(originalCopy);
+        }
+        element.replaceChildren(...content);
+        element.classList.remove("translatable");
+    }
+}
+
 function exportHTML(pdfURL: string) {
     let exported = document.documentElement.cloneNode(true) as HTMLElement;
-    exported.querySelectorAll("script, #export-controls").forEach((element) => element.remove());
+    exportedTranslationContent(exported);
+    exported.querySelectorAll("script, #document-controls, #progress").forEach((element) => element.remove());
 
     let fileName = htmlFileName(pdfURL);
     let title = exported.querySelector("title");
@@ -195,11 +233,168 @@ function exportHTML(pdfURL: string) {
 }
 
 function enableHTMLExport(pdfURL: string) {
-    let controls = document.getElementById("export-controls");
+    let controls = document.getElementById("document-controls");
     let button = document.getElementById("export-html");
     if (controls && button instanceof HTMLButtonElement) {
         controls.hidden = false;
         button.onclick = () => exportHTML(pdfURL);
+    }
+}
+
+function translatableElements() {
+    return Array.from(document.querySelectorAll<HTMLElement>(
+        "#main > p, #main > h1, #main > h2, #main > h3, #main > h4, #main > h5, #main > h6, #main > figcaption, #main > figure > figcaption"
+    )).filter((element) => (element.textContent?.trim().length ?? 0) > 0);
+}
+
+function setElementOriginalVisible(element: HTMLElement, visible: boolean) {
+    let original = element.querySelector<HTMLElement>(":scope > .translation-original");
+    let toggle = element.querySelector<HTMLButtonElement>(":scope > .translation-toggle");
+    if (!original || !toggle) {
+        return;
+    }
+
+    original.hidden = !visible;
+    original.classList.toggle("translation-alternative", visible);
+    toggle.textContent = visible ? "Hide original" : "Original";
+    toggle.setAttribute("aria-label", visible ? "Hide original text" : "Show original text");
+    toggle.setAttribute("aria-expanded", String(visible));
+}
+
+function attachTranslation(element: HTMLElement, translatedText: string) {
+    let original = document.createElement("span");
+    original.className = "translation-original";
+    original.lang = "en";
+    while (element.firstChild) {
+        original.appendChild(element.firstChild);
+    }
+
+    let translated = document.createElement("span");
+    translated.className = "translation-japanese";
+    translated.lang = "ja";
+    translated.textContent = translatedText;
+
+    let toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "text-button translation-toggle";
+    toggle.onclick = () => setElementOriginalVisible(element, original.hasAttribute("hidden"));
+
+    element.classList.add("translatable");
+    element.lang = "ja";
+    element.append(translated, toggle, original);
+    setElementOriginalVisible(element, false);
+}
+
+function setDocumentOriginalsVisible(visible: boolean) {
+    for (let element of document.querySelectorAll<HTMLElement>("#main .translatable")) {
+        setElementOriginalVisible(element, visible);
+    }
+
+    let toggle = document.getElementById("toggle-document-originals");
+    if (toggle instanceof HTMLButtonElement) {
+        toggle.textContent = visible ? "Hide originals" : "Show originals";
+        toggle.onclick = () => setDocumentOriginalsVisible(!visible);
+    }
+}
+
+async function translateDocument() {
+    let factory = window.Translator;
+    let translateButton = document.getElementById("translate-document");
+    let originalsButton = document.getElementById("toggle-document-originals");
+    let status = document.getElementById("translation-status");
+    let progress = document.getElementById("progress") as HTMLProgressElement | null;
+    if (!factory || !(translateButton instanceof HTMLButtonElement) || !(originalsButton instanceof HTMLButtonElement)) {
+        return;
+    }
+
+    translateButton.disabled = true;
+    if (status) {
+        status.textContent = "Preparing translation…";
+    }
+    if (progress) {
+        progress.hidden = false;
+        progress.removeAttribute("value");
+    }
+
+    try {
+        // create() は言語パックのダウンロード時にユーザー操作を要求するため、
+        // Translate ボタンの click handler から直接呼び出す。
+        let translator = await factory.create({
+            sourceLanguage: "en",
+            targetLanguage: "ja",
+            monitor(monitor) {
+                monitor.addEventListener("downloadprogress", (event) => {
+                    let loaded = (event as ProgressEvent).loaded;
+                    if (progress) {
+                        progress.max = 1;
+                        progress.value = loaded;
+                    }
+                });
+            }
+        });
+
+        let elements = translatableElements();
+        if (progress) {
+            progress.max = elements.length;
+            progress.value = 0;
+        }
+        for (let [index, element] of elements.entries()) {
+            let sourceText = element.textContent?.trim() ?? "";
+            try {
+                attachTranslation(element, await translator.translate(sourceText));
+            }
+            catch (error) {
+                console.warn("Failed to translate a block", error);
+            }
+            if (progress) {
+                progress.value = index + 1;
+            }
+            if (status) {
+                status.textContent = `Translating ${index + 1}/${elements.length}`;
+            }
+        }
+        translator.destroy?.();
+
+        translateButton.hidden = true;
+        originalsButton.hidden = false;
+        setDocumentOriginalsVisible(false);
+        if (status) {
+            status.textContent = "";
+        }
+    }
+    catch (error) {
+        console.warn("Translation is unavailable", error);
+        translateButton.disabled = false;
+        if (status) {
+            status.textContent = "Translation unavailable";
+        }
+    }
+    finally {
+        if (progress) {
+            progress.hidden = true;
+        }
+    }
+}
+
+async function enableTranslation() {
+    let factory = window.Translator;
+    let controls = document.getElementById("document-controls");
+    let translationControls = document.getElementById("translation-controls");
+    let button = document.getElementById("translate-document");
+    if (!factory || !controls || !translationControls || !(button instanceof HTMLButtonElement)) {
+        return;
+    }
+
+    try {
+        if (await factory.availability({sourceLanguage: "en", targetLanguage: "ja"}) == "unavailable") {
+            return;
+        }
+        controls.hidden = false;
+        translationControls.hidden = false;
+        button.onclick = () => void translateDocument();
+    }
+    catch (error) {
+        console.warn("Failed to check translation availability", error);
     }
 }
 
@@ -239,7 +434,11 @@ function load(fileName: string) {
         let nodes = extractNodesFromPages(pages);
         await attachFigureImages(nodes, pageProxies);
         show(nodes);
+        if (progress) {
+            progress.hidden = true;
+        }
         enableHTMLExport(fileName);
+        void enableTranslation();
     });
 }
 
