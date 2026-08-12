@@ -367,6 +367,62 @@ function enableDragScrolling(viewport: HTMLElement) {
     viewport.onpointercancel = stopDragging;
 }
 
+function layoutPDFSourcePage(
+    pageElement: HTMLElement,
+    image: HTMLImageElement,
+    highlight: HTMLElement,
+    page: PDFSourcePageImage,
+    rect: PDF_Rect,
+    zoom: number
+) {
+    let scale = page.scale * zoom;
+    let width = page.width * zoom;
+    let height = page.height * zoom;
+    pageElement.style.width = `${width}px`;
+    pageElement.style.height = `${height}px`;
+    image.style.width = `${width}px`;
+    image.style.height = `${height}px`;
+    highlight.style.left = `${rect.x * scale}px`;
+    highlight.style.top = `${(page.pageHeight - rect.y - rect.height) * scale}px`;
+    highlight.style.width = `${rect.width * scale}px`;
+    highlight.style.height = `${rect.height * scale}px`;
+}
+
+function enablePDFSourceZoom(
+    viewport: HTMLElement,
+    pageElement: HTMLElement,
+    image: HTMLImageElement,
+    highlight: HTMLElement,
+    page: PDFSourcePageImage,
+    rect: PDF_Rect,
+    label: HTMLElement
+) {
+    let zoom = 1;
+    viewport.addEventListener("wheel", (event) => {
+        if (!event.ctrlKey) {
+            return;
+        }
+        event.preventDefault();
+
+        let bounds = viewport.getBoundingClientRect();
+        let pointerX = event.clientX - bounds.left;
+        let pointerY = event.clientY - bounds.top;
+        let contentX = viewport.scrollLeft + pointerX;
+        let contentY = viewport.scrollTop + pointerY;
+        let nextZoom = Math.min(4, Math.max(0.5, zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15)));
+        if (nextZoom == zoom) {
+            return;
+        }
+
+        let ratio = nextZoom / zoom;
+        zoom = nextZoom;
+        layoutPDFSourcePage(pageElement, image, highlight, page, rect, zoom);
+        viewport.scrollLeft = contentX * ratio - pointerX;
+        viewport.scrollTop = contentY * ratio - pointerY;
+        label.textContent = `Page ${rect.page} · ${Math.round(zoom * 100)}% · Drag to move · Ctrl+wheel to zoom`;
+    }, {passive: false});
+}
+
 function centerPDFSource(viewport: HTMLElement, page: PDFSourcePageImage, rect: PDF_Rect) {
     let centerX = (rect.x + rect.width / 2) * page.scale;
     let centerY = (page.pageHeight - rect.y - rect.height / 2) * page.scale;
@@ -411,11 +467,9 @@ function attachPDFSourceToggle(element: HTMLElement) {
             viewport.className = "pdf-source-viewport";
             viewport.tabIndex = 0;
             viewport.setAttribute("role", "region");
-            viewport.setAttribute("aria-label", `Source PDF page ${source.rect.page}; drag to move`);
-            let page = document.createElement("span");
-            page.className = "pdf-source-page";
-            page.style.width = `${pageImage.width}px`;
-            page.style.height = `${pageImage.height}px`;
+            viewport.setAttribute("aria-label", `Source PDF page ${source.rect.page}; drag to move; Control plus wheel to zoom`);
+            let pageElement = document.createElement("span");
+            pageElement.className = "pdf-source-page";
             let image = document.createElement("img");
             image.src = pageImage.src;
             image.alt = `Source PDF page ${source.rect.page}`;
@@ -424,17 +478,15 @@ function attachPDFSourceToggle(element: HTMLElement) {
             image.draggable = false;
             let highlight = document.createElement("span");
             highlight.className = "pdf-source-highlight";
-            highlight.style.left = `${source.rect.x * pageImage.scale}px`;
-            highlight.style.top = `${(pageImage.pageHeight - source.rect.y - source.rect.height) * pageImage.scale}px`;
-            highlight.style.width = `${source.rect.width * pageImage.scale}px`;
-            highlight.style.height = `${source.rect.height * pageImage.scale}px`;
-            page.append(image, highlight);
-            viewport.appendChild(page);
+            pageElement.append(image, highlight);
+            viewport.appendChild(pageElement);
             let pageLabel = document.createElement("small");
-            pageLabel.textContent = `Page ${source.rect.page} · Drag to move`;
+            pageLabel.textContent = `Page ${source.rect.page} · 100% · Drag to move · Ctrl+wheel to zoom`;
             preview.append(viewport, pageLabel);
             element.appendChild(preview);
+            layoutPDFSourcePage(pageElement, image, highlight, pageImage, source.rect, 1);
             enableDragScrolling(viewport);
+            enablePDFSourceZoom(viewport, pageElement, image, highlight, pageImage, source.rect, pageLabel);
             setPDFSourceVisible(toggle, preview, true, source.rect.page);
             centerPDFSource(viewport, pageImage, source.rect);
         }
