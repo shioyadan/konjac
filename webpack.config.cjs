@@ -3,8 +3,8 @@
 module.exports = {
     // 入力ファイル
     entry: {
-        viewer: "./extension_viewer.ts",
-        main: "./main.ts"
+        viewer: "./src/extension/viewer.ts",
+        main: "./src/extension/main.ts"
     },
     output: {
         // 出力先

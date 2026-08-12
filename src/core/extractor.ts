@@ -1,6 +1,6 @@
 "use strict";
 
-// PDF.js の TextItem 群から論文らしい HTML 構造を推定する軽量な抽出器。
+// 拡張版、CLI、Web版で共有する、PDF.jsのTextItem群からHTML構造を推定する抽出器。
 // 処理の流れ:
 //   1. TextItem を座標付き TextPart に正規化する。
 //   2. y 座標と x 座標から TextLine を復元する。

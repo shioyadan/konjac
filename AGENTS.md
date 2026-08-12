@@ -1,6 +1,6 @@
 # Konjac Agent Guide
 
-Konjac は、PDF を解析して論文向けのプレーンな HTML として表示する Chrome 拡張です。Chrome 拡張と CLI は同じ抽出エンジンを共有しており、抽出ロジックの変更はまず CLI で `work` 以下の PDF を変換して確認します。
+Konjac は、PDF を解析して論文向けのプレーンな HTML として表示する Chrome 拡張です。Chrome 拡張、CLI、Web版は同じ抽出エンジンを共有しており、抽出ロジックの変更はまず CLI で `work` 以下の PDF を変換して確認します。
 
 この文書は、このリポジトリで作業するエージェント向けに、全体構造、検証手順、デバッグ方法、作業上の注意点をまとめたものです。
 
@@ -8,18 +8,16 @@ Konjac は、PDF を解析して論文向けのプレーンな HTML として表
 
 PDF.js で PDF の text content と描画オブジェクトを取り出し、タイトル、見出し、段落、図表、キャプション、参照リンクなどの構造を推定します。
 
-同じ抽出エンジンを Chrome 拡張と CLI で共有しています。抽出精度を直すときは、拡張上で試す前に CLI で対象 PDF を変換して確認します。
+同じ抽出エンジンを Chrome 拡張、CLI、Web版で共有しています。抽出精度を直すときは、拡張上で試す前に CLI で対象 PDF を変換して確認します。
 
 ## 大まかな構造
 
-- `extractor.ts`: PDF の構造抽出の中心。本文行、見出し、図表、キャプション、リンク、HTML 生成の多くがここにある。
-- `viewer.ts`: 拡張版とWeb版で共有する viewer。PDF を読み込み、`extractor.ts` の結果を DOM と図表画像へ変換する。
-- `extension_viewer.ts`: Chrome 拡張版 viewer の起動処理。
-- `web_viewer.ts`, `web.html`, `embedded_cmaps.ts`: ローカルPDFを表示し、WorkerとCMapを単一HTMLへ埋め込むWeb版。
-- `main.ts`: Chrome 拡張の service worker。コンテキストメニューから viewer を開く。
-- `cli.ts`: CLI 変換。Chrome を使わず、同じ抽出エンジンで HTML/JSON/debug 出力を作る。
+- `src/core/extractor.ts`: PDF の構造抽出の中心。本文行、見出し、図表、キャプション、リンク、HTML 生成の多くがここにある。
+- `src/core/viewer.ts`: 拡張版とWeb版で共有する viewer。PDF を読み込み、抽出結果を DOM と図表画像へ変換する。
+- `src/extension/`: Chrome 拡張の service worker、viewer entry、manifest、HTML。
+- `src/cli/`: Chrome を使わず、同じ抽出エンジンで HTML/JSON/debug 出力を作る CLI。
+- `src/web/`: ローカルPDFを表示し、WorkerとCMapを単一HTMLへ埋め込むWeb版。
 - `Makefile`: 拡張ビルド、CLI ビルド、CLI 変換の入口。
-- `manifest.json`, `viewer.html`: Chrome 拡張として必要なファイル。
 - `work/`: 手元検証用の PDF と変換結果。大量の一時出力はなるべく `/tmp` を使う。
 - `dist/`: webpack の出力。`extension`、`web`、`cli` 以下へ用途別に生成される。
 
@@ -28,7 +26,7 @@ PDF.js で PDF の text content と描画オブジェクトを取り出し、タ
 - PDF 個別の特化処理は避ける。特定の論文名、図番号、本文の語句に依存した判定は入れない。
 - なるべくレイアウト、フォント、行間、bbox、PDF の描画オブジェクトなど、文書一般に使える情報で判定する。
 - 実装はコンパクトに保つ。古い補正や使われなくなった helper は残さない。
-- `extractor.ts` に処理を追加するときは、既存の抽出フローに沿って局所的に入れる。
+- `src/core/extractor.ts` に処理を追加するときは、既存の抽出フローに沿って局所的に入れる。
 - 変更後は `npx tsc --noEmit` と CLI 変換を確認する。拡張に影響する変更では `make` も確認する。
 
 ## よく使うコマンド

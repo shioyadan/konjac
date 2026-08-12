@@ -10,7 +10,7 @@ module.exports = (_env, argv) => {
 
     return {
         entry: {
-            web_viewer: "./web_viewer.ts"
+            web_viewer: "./src/web/viewer.ts"
         },
         output: {
             path: path.resolve(__dirname, "dist/web"),
@@ -66,7 +66,7 @@ module.exports = (_env, argv) => {
         },
         plugins: [
             new HtmlWebpackPlugin({
-                template: "./web.html",
+                template: "./src/web/index.html",
                 filename: "index.html",
                 inject: "body",
                 scriptLoading: "defer",

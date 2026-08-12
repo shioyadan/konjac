@@ -5,11 +5,13 @@
         "lib": [
             "dom"
         ],
-        "moduleResolution": "node"
+        "moduleResolution": "node",
+        "ignoreDeprecations": "6.0"
     },
     "exclude": [
         "node_modules",
         "work",
         "dist"
-    ]
+    ],
+    "include": ["src/**/*.js"]
 }

@@ -3,7 +3,7 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import PDFWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import {EmbeddedCMapReaderFactory} from "./embedded_cmaps";
-import {loadPDF} from "./viewer";
+import {loadPDF} from "../core/viewer";
 
 pdfjsLib.GlobalWorkerOptions.workerPort = new PDFWorker();
 

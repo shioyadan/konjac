@@ -11,8 +11,8 @@ extension-build:
 	npx webpack --config=webpack.config.cjs
 	mkdir -p dist/extension/cmaps
 	cp -r node_modules/pdfjs-dist/cmaps/. dist/extension/cmaps
-	cp manifest.json dist/extension/manifest.json
-	cp viewer.html dist/extension/viewer.html
+	cp src/extension/manifest.json dist/extension/manifest.json
+	cp src/extension/viewer.html dist/extension/viewer.html
 
 web-build:
 	npx webpack --config=webpack.web.config.cjs --mode=production

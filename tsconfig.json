@@ -3,6 +3,7 @@
         "target": "ES2020", 
         "module": "ES2020",
         "sourceMap": true,
+        "rootDir": "./src",
         "outDir": "./dist",
         //"outFile": "./dist/index.js",
         "strict": true,
@@ -11,4 +12,5 @@
         "ignoreDeprecations": "6.0",
         "types": ["chrome"]
     },
+    "include": ["src/**/*.ts"]
 }

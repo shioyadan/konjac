@@ -9,6 +9,7 @@ declare const require: {
     context(directory: string, useSubdirectories: boolean, pattern: RegExp): WebpackContext;
 };
 
+// file://でも読めるよう、PDF.jsのCMapをWeb bundleへ埋め込む。
 const context = require.context("pdfjs-dist/cmaps", false, /\.bcmap$/);
 const cMaps = new Map(context.keys().map((key) => {
     let module = context(key);

@@ -1,5 +1,6 @@
 "use strict";
 
+// Chrome拡張のservice worker。
 const ID_KONJAC = "ID_KONJAC";
 const CONTEXT_MENU_PROPS = {
     "title": "View PDF",

@@ -1,5 +1,5 @@
 "use strict";
-import "./external_modules_src";
+import "./browser_dependencies";
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import {

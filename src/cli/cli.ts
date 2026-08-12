@@ -10,7 +10,7 @@ import {
     extractNodesFromPages,
     extractPageInputFromPDFPage,
     nodesToHTML
-} from "./extractor";
+} from "../core/extractor";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs";
 

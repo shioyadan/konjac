@@ -19,6 +19,13 @@ make
 
 個別に生成する場合は、`make extension-build`、`make web-build`、`make cli-build` を使います。
 
+ソースコードは用途別に分かれています。
+
+- `src/core`: 共通の抽出・表示ロジック
+- `src/extension`: Chrome 拡張
+- `src/cli`: CLI
+- `src/web`: 単一HTMLのWeb版
+
 ## Chrome 拡張として使う
 
 1. Chrome で `chrome://extensions` を開く。

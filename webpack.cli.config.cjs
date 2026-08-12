@@ -2,7 +2,7 @@
 
 module.exports = {
     entry: {
-        cli: "./cli.ts"
+        cli: "./src/cli/cli.ts"
     },
     output: {
         path: `${__dirname}/dist/cli`,

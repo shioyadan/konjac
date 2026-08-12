@@ -1,7 +1,7 @@
 "use strict";
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import {loadPDF} from "./viewer";
+import {loadPDF} from "../core/viewer";
 
 pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url), {type: "module"});
 

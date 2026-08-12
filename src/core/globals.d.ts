@@ -1,3 +1,4 @@
+// ブラウザ向けbundleで読み込むアセットの型宣言。
 declare module "*.css" {
     const content: string;
     export default content;
