@@ -334,7 +334,12 @@ function enableDragScrolling(viewport: HTMLElement) {
     let startTop = 0;
 
     viewport.onpointerdown = (event) => {
-        if (event.button != 0) {
+        let bounds = viewport.getBoundingClientRect();
+        let contentRight = bounds.left + viewport.clientLeft + viewport.clientWidth;
+        let contentBottom = bounds.top + viewport.clientTop + viewport.clientHeight;
+        let onScrollbar = event.clientX >= contentRight || event.clientY >= contentBottom;
+        let onResizeHandle = event.clientX >= bounds.right - 24 && event.clientY >= bounds.bottom - 24;
+        if (event.button != 0 || onScrollbar || onResizeHandle) {
             return;
         }
         pointerId = event.pointerId;

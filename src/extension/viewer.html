@@ -29,7 +29,7 @@
         .translation-alternative { display: block; margin-top: 0.35rem; }
         .pdf-source-preview { display: block; margin-top: 0.5rem; }
         .pdf-source-preview[hidden] { display: none; }
-        .pdf-source-viewport { display: block; height: 18rem; overflow: auto; border: 2px solid #6ea8fe; background: #e9ecef; box-shadow: inset 0 0 0 1px #fff; cursor: grab; touch-action: none; overscroll-behavior: contain; }
+        .pdf-source-viewport { display: block; height: 18rem; min-height: 8rem; max-height: 80vh; overflow: auto; resize: vertical; border: 2px solid #6ea8fe; background: #e9ecef; box-shadow: inset 0 0 0 1px #fff; cursor: grab; touch-action: none; overscroll-behavior: contain; }
         .pdf-source-viewport:focus-visible { outline: 3px solid #9ec5fe; outline-offset: 2px; }
         .pdf-source-viewport.dragging { cursor: grabbing; user-select: none; }
         .pdf-source-page { position: relative; display: block; }
