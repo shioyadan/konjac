@@ -13,13 +13,15 @@ PDF.js で PDF の text content と描画オブジェクトを取り出し、タ
 ## 大まかな構造
 
 - `extractor.ts`: PDF の構造抽出の中心。本文行、見出し、図表、キャプション、リンク、HTML 生成の多くがここにある。
-- `viewer.ts`: Chrome 拡張の viewer。PDF を読み込み、`extractor.ts` の結果を DOM と図表画像へ変換する。
+- `viewer.ts`: 拡張版とWeb版で共有する viewer。PDF を読み込み、`extractor.ts` の結果を DOM と図表画像へ変換する。
+- `extension_viewer.ts`: Chrome 拡張版 viewer の起動処理。
+- `web_viewer.ts`, `web.html`, `embedded_cmaps.ts`: ローカルPDFを表示し、WorkerとCMapを単一HTMLへ埋め込むWeb版。
 - `main.ts`: Chrome 拡張の service worker。コンテキストメニューから viewer を開く。
 - `cli.ts`: CLI 変換。Chrome を使わず、同じ抽出エンジンで HTML/JSON/debug 出力を作る。
 - `Makefile`: 拡張ビルド、CLI ビルド、CLI 変換の入口。
 - `manifest.json`, `viewer.html`: Chrome 拡張として必要なファイル。
 - `work/`: 手元検証用の PDF と変換結果。大量の一時出力はなるべく `/tmp` を使う。
-- `dist/`: webpack の出力。通常は `make` / `make cli-build` で生成される。
+- `dist/`: webpack の出力。`extension`、`web`、`cli` 以下へ用途別に生成される。
 
 ## 基本方針
 
@@ -44,7 +46,7 @@ make
 
 `make cli-json` は抽出ノードを JSON で出す。タイトル、段落、図表、bbox、リンクなどの構造確認に使う。
 
-`make` は Chrome 拡張として必要なファイルを `dist` に出す。拡張側に影響する変更では最後に実行する。
+`make` は Chrome 拡張、単一HTMLのWeb版、CLIをそれぞれ `dist/extension`、`dist/web/index.html`、`dist/cli` に出す。拡張側またはWeb版に影響する変更では最後に実行する。
 
 ## PDF テストの流れ
 
@@ -93,8 +95,8 @@ make
 make cli-build
 PDF=work/<target>.pdf
 BASE="${PDF%.pdf}"
-node dist/cli.cjs --json --debug-mask "${BASE}.debug-mask" "$PDF" > "${BASE}.current.json"
-node dist/cli.cjs --json --debug-scan "<caption text>" "$PDF" > "${BASE}.current.json" 2> "${BASE}.debug.log"
+node dist/cli/cli.cjs --json --debug-mask "${BASE}.debug-mask" "$PDF" > "${BASE}.current.json"
+node dist/cli/cli.cjs --json --debug-scan "<caption text>" "$PDF" > "${BASE}.current.json" 2> "${BASE}.debug.log"
 ```
 
 - `--debug-mask <dir>` はページごとの mask SVG を出す。本文、caption、shape、除外された shape などの領域確認に使う。
@@ -103,13 +105,13 @@ node dist/cli.cjs --json --debug-scan "<caption text>" "$PDF" > "${BASE}.current
 
 ## 拡張としての確認
 
-拡張に必要なファイルは `make` で `dist` に出る。
+拡張に必要なファイルは `make extension-build` で `dist/extension` に出る。`make` ではWeb版とCLIもまとめて生成される。
 
 ```sh
 make
 ```
 
-Chrome では `dist` を unpacked extension として読み込む。ローカル PDF を直接扱う場合は、Chrome の拡張設定で「ファイルの URL へのアクセスを許可」が必要になる。
+Chrome では `dist/extension` を unpacked extension として読み込む。ローカル PDF を直接扱う場合は、Chrome の拡張設定で「ファイルの URL へのアクセスを許可」が必要になる。
 
 ## 作業上の注意
 

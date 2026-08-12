@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Konjac</title>
     <style>
+        #pdf-drop-zone { display: block; margin-top: 1rem; padding: 0.7rem; border: 1px dashed #bbb; color: #555; text-align: center; cursor: pointer; }
+        #pdf-drop-zone.dragging { border-color: #0d6efd; color: #0d6efd; }
+        #web-status { display: block; min-height: 1.5em; margin-top: 0.4rem; color: #555; }
+        #web-status.error { color: #a00; }
         #document-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
         #translation-controls { display: inline-flex; align-items: center; gap: 0.75rem; }
         #document-controls[hidden], #translation-controls[hidden] { display: none; }
@@ -15,15 +19,19 @@
         .translation-alternative { display: block; margin-top: 0.35rem; }
         @media (hover: none) { .translation-toggle { opacity: 0.6; } }
     </style>
-    <script type="module" src="viewer.js"></script>
 </head>
 <body>
-
     <div class="container-md">
         <div class="row">
-            <!-- md サイズ以上の場合に，2:8:2 で div を配置 -->
             <div class="col-md-2"></div>
             <div class="col-md-8">
+                <div data-export-exclude>
+                    <label id="pdf-drop-zone" for="pdf-file">
+                        Drop a PDF here or choose a file
+                        <input id="pdf-file" type="file" accept="application/pdf,.pdf" hidden>
+                    </label>
+                    <small id="web-status" aria-live="polite"></small>
+                </div>
                 <div id="document-controls" data-export-exclude hidden>
                     <span id="translation-controls" hidden>
                         <button id="translate-document" type="button" class="text-button">Translate to Japanese</button>
@@ -38,6 +46,5 @@
             <div class="col-md-2"></div>
         </div>
     </div>
-
 </body>
 </html>

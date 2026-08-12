@@ -5,8 +5,9 @@ module.exports = {
         cli: "./cli.ts"
     },
     output: {
-        path: `${__dirname}/dist`,
-        filename: "cli.cjs"
+        path: `${__dirname}/dist/cli`,
+        filename: "cli.cjs",
+        clean: true
     },
     target: "node",
     externals: {

@@ -16,8 +16,6 @@ import {
     nodeToHTMLElementName
 } from "./extractor";
 
-pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url), {type: "module"});
-
 console.log("initialized.");
 
 const FIGURE_RENDER_SCALE = 4.0;
@@ -34,6 +32,10 @@ interface ChromeTranslatorFactory {
         targetLanguage: string;
         monitor(monitor: EventTarget): void;
     }): Promise<ChromeTranslator>;
+}
+
+interface PDFLoadOptions {
+    CMapReaderFactory?: new (options: {baseUrl?: string | null; isCompressed?: boolean}) => unknown;
 }
 
 declare global {
@@ -213,7 +215,7 @@ function exportedTranslationContent(exported: HTMLElement) {
 function exportHTML(pdfURL: string) {
     let exported = document.documentElement.cloneNode(true) as HTMLElement;
     exportedTranslationContent(exported);
-    exported.querySelectorAll("script, #document-controls, #progress").forEach((element) => element.remove());
+    exported.querySelectorAll("script, [data-export-exclude]").forEach((element) => element.remove());
 
     let fileName = htmlFileName(pdfURL);
     let title = exported.querySelector("title");
@@ -398,15 +400,41 @@ async function enableTranslation() {
     }
 }
 
-function load(fileName: string) {
+export function loadPDF(source: string, sourceName = source, options: PDFLoadOptions = {}) {
     let progress = document.getElementById("progress") as HTMLProgressElement | null;
+    let main = document.getElementById("main");
+    let controls = document.getElementById("document-controls");
+    let translationControls = document.getElementById("translation-controls");
+    let translateButton = document.getElementById("translate-document");
+    let originalsButton = document.getElementById("toggle-document-originals");
+    let translationStatus = document.getElementById("translation-status");
+    main?.replaceChildren();
+    if (controls) {
+        controls.hidden = true;
+    }
+    if (translationControls) {
+        translationControls.hidden = true;
+    }
+    if (translateButton instanceof HTMLButtonElement) {
+        translateButton.hidden = false;
+        translateButton.disabled = false;
+    }
+    if (originalsButton instanceof HTMLButtonElement) {
+        originalsButton.hidden = true;
+    }
+    if (translationStatus) {
+        translationStatus.textContent = "";
+    }
     if (progress) {
         progress.hidden = false;
+        progress.removeAttribute("value");
     }
     let loadingTask = pdfjsLib.getDocument({
-        url: fileName,
+        url: source,
         cMapPacked: true,
-        cMapUrl: "cmaps/"   // 日本語（や他の言語）を表示するために必要なマップファイル．Makefile で dist にコピーされる
+        ...(options.CMapReaderFactory
+            ? {CMapReaderFactory: options.CMapReaderFactory, useWorkerFetch: false}
+            : {cMapUrl: "cmaps/"})
     });
 
     loadingTask.onProgress = ({loaded, total}: {loaded: number; total: number}) => {
@@ -416,7 +444,7 @@ function load(fileName: string) {
         }
     };
 
-    loadingTask.promise.then(async (pdf) => {
+    return loadingTask.promise.then(async (pdf) => {
         if (progress) {
             progress.max = pdf.numPages;
             progress.value = 0;
@@ -437,27 +465,8 @@ function load(fileName: string) {
         if (progress) {
             progress.hidden = true;
         }
-        enableHTMLExport(fileName);
+        enableHTMLExport(sourceName);
         void enableTranslation();
     });
 }
-
-
-// アクティブなタブの URL を取得して使う
-chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-    let url = tabs[0].url;
-    // file= にローカルにダウンロードした PDF の URL が埋め込まれているので，それをロードする
-    if (url) {
-        let targetURL = new URL(url).searchParams.get("file");
-        if (!targetURL) {
-            return;
-        }
-        console.log(targetURL);
-        load(targetURL);
-    }
-});
-
-
-
-// console.log(import.meta.url);
 

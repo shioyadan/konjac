@@ -3,16 +3,17 @@
 module.exports = {
     // 入力ファイル
     entry: {
-        viewer: "./viewer.ts",
+        viewer: "./extension_viewer.ts",
         main: "./main.ts"
     },
     output: {
         // 出力先
-        path: `${__dirname}/dist`,
+        path: `${__dirname}/dist/extension`,
         // 生成済みファイルから参照される時のパス
         publicPath: "auto",
         // 生成ファイル
         filename: "[name].js",
+        clean: true,
         // 出力フォーマット
         // library: "external_modules",
         // libraryTarget: "umd",

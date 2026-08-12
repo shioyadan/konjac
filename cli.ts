@@ -45,7 +45,7 @@ const fs = require("fs") as {
 const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
-    console.error("usage: node dist/cli.cjs [--html|--json] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
+    console.error("usage: node dist/cli/cli.cjs [--html|--json] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
 }
 
 function parseArgs(args: string[]) {
