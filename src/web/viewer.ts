@@ -11,6 +11,7 @@ const WEB_PDF_OPTIONS = {CMapReaderFactory: EmbeddedCMapReaderFactory};
 
 let fileInput = document.getElementById("pdf-file");
 let dropZone = document.getElementById("pdf-drop-zone");
+let sourceControls = document.getElementById("pdf-source-controls");
 let status = document.getElementById("web-status");
 
 function setStatus(message: string, error = false) {
@@ -34,6 +35,9 @@ async function openLocalPDF(file: File | undefined) {
     try {
         await loadPDF(fileURL, file.name, WEB_PDF_OPTIONS);
         setStatus("");
+        if (sourceControls) {
+            sourceControls.hidden = true;
+        }
     }
     catch (error) {
         console.error(error);
@@ -54,6 +58,12 @@ if (fileInput instanceof HTMLInputElement) {
 }
 
 if (dropZone) {
+    dropZone.onkeydown = (event) => {
+        if ((event.key == "Enter" || event.key == " ") && fileInput instanceof HTMLInputElement) {
+            event.preventDefault();
+            fileInput.click();
+        }
+    };
     dropZone.ondragover = (event) => {
         event.preventDefault();
         if (event.dataTransfer) {

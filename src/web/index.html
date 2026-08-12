@@ -19,8 +19,11 @@
         .viewer-container { width: 100%; margin-inline: auto; padding-inline: 0.75rem; }
         .viewer-row { display: flex; flex-wrap: wrap; margin-inline: -0.75rem; }
         .viewer-row > * { flex-shrink: 0; width: 100%; max-width: 100%; padding-inline: 0.75rem; }
-        #pdf-drop-zone { display: block; margin-top: 1rem; padding: 0.7rem; border: 1px dashed #bbb; color: #555; text-align: center; cursor: pointer; }
-        #pdf-drop-zone.dragging { border-color: #0d6efd; color: #0d6efd; }
+        #pdf-drop-zone { display: flex; min-height: 9rem; margin-top: 1rem; padding: 1.5rem; align-items: center; justify-content: center; flex-direction: column; gap: 0.25rem; border: 2px dashed #adb5bd; background: #f8f9fa; color: #495057; text-align: center; cursor: pointer; }
+        #pdf-drop-zone:hover, #pdf-drop-zone:focus-visible, #pdf-drop-zone.dragging { border-color: #0d6efd; background: #f0f6ff; outline: none; }
+        #pdf-drop-zone:focus-visible { box-shadow: 0 0 0 2px #9ec5fe; }
+        .drop-zone-action { color: #0d6efd; font-size: 1.1rem; font-weight: 600; }
+        .drop-zone-hint { font-size: 0.9rem; }
         #web-status { display: block; min-height: 1.5em; margin-top: 0.4rem; color: #555; }
         #web-status.error { color: #a00; }
         #document-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
@@ -54,9 +57,10 @@
         <div class="viewer-row">
             <div class="viewer-side"></div>
             <div class="viewer-main">
-                <div data-export-exclude>
-                    <label id="pdf-drop-zone" for="pdf-file">
-                        Drop a PDF here or choose a file
+                <div id="pdf-source-controls" data-export-exclude>
+                    <label id="pdf-drop-zone" for="pdf-file" role="button" tabindex="0">
+                        <span class="drop-zone-action">Choose a PDF</span>
+                        <span class="drop-zone-hint">or drop it here</span>
                         <input id="pdf-file" type="file" accept="application/pdf,.pdf" hidden>
                     </label>
                     <small id="web-status" aria-live="polite"></small>
