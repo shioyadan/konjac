@@ -65,6 +65,9 @@ interface PDFSourcePageImage {
 
 const pdfSourceLocations = new WeakMap<HTMLElement, PDFSourceLocation>();
 const pdfSourcePageImages = new WeakMap<object, Promise<PDFSourcePageImage | null>>();
+let pdfSelectionButton: HTMLButtonElement | null = null;
+let selectedPDFSources: PDFSourceLocation[] = [];
+let selectedPDFAnchor: HTMLElement | null = null;
 
 async function renderPageCanvas(page: any, scale = FIGURE_RENDER_SCALE) {
     let viewport = page.getViewport({scale});
@@ -223,7 +226,7 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
         attachPDFSourceToggle(div);
         main.appendChild(div);
     }
-
+    enablePDFSelection();
 }
 
 function htmlFileName(pdfURL: string) {
@@ -435,6 +438,166 @@ function centerPDFSource(viewport: HTMLElement, page: PDFSourcePageImage, rect: 
     viewport.scrollTop = centerY - viewport.clientHeight / 2;
 }
 
+async function createPDFSourcePreview(source: PDFSourceLocation) {
+    let pageImage = await sourcePageImage(source.page);
+    if (!pageImage) {
+        throw new Error("Could not render the source PDF area");
+    }
+
+    let preview = document.createElement("span");
+    preview.className = "pdf-source-preview";
+    preview.dataset.exportExclude = "";
+
+    let viewport = document.createElement("span");
+    viewport.className = "pdf-source-viewport";
+    viewport.tabIndex = 0;
+    viewport.setAttribute("role", "region");
+    viewport.setAttribute("aria-label", `Source PDF page ${source.rect.page}; drag to move; Control plus wheel to zoom`);
+    let pageElement = document.createElement("span");
+    pageElement.className = "pdf-source-page";
+    let image = document.createElement("img");
+    image.src = pageImage.src;
+    image.alt = `Source PDF page ${source.rect.page}`;
+    image.width = pageImage.width;
+    image.height = pageImage.height;
+    image.draggable = false;
+    let highlight = document.createElement("span");
+    highlight.className = "pdf-source-highlight";
+    pageElement.append(image, highlight);
+    viewport.appendChild(pageElement);
+    let pageLabel = document.createElement("small");
+    pageLabel.textContent = `Page ${source.rect.page} · 100% · Drag to move · Ctrl+wheel to zoom`;
+    preview.append(viewport, pageLabel);
+    layoutPDFSourcePage(pageElement, image, highlight, pageImage, source.rect, 1);
+    enableDragScrolling(viewport);
+    enablePDFSourceZoom(viewport, pageElement, image, highlight, pageImage, source.rect, pageLabel);
+    requestAnimationFrame(() => centerPDFSource(viewport, pageImage, source.rect));
+    return preview;
+}
+
+function combinedPDFSource(sources: PDFSourceLocation[]) {
+    let first = sources[0];
+    let x = Math.min(...sources.map((source) => source.rect.x));
+    let y = Math.min(...sources.map((source) => source.rect.y));
+    let right = Math.max(...sources.map((source) => source.rect.x + source.rect.width));
+    let top = Math.max(...sources.map((source) => source.rect.y + source.rect.height));
+    return {page: first.page, rect: {page: first.rect.page, x, y, width: right - x, height: top - y}};
+}
+
+async function showPDFSelection(sources: PDFSourceLocation[], anchor: HTMLElement) {
+    document.querySelector(".pdf-selection-preview")?.remove();
+
+    let panel = document.createElement("section");
+    panel.className = "pdf-selection-preview";
+    panel.dataset.exportExclude = "";
+    let header = document.createElement("header");
+    header.textContent = "PDF selection";
+    let close = document.createElement("button");
+    close.type = "button";
+    close.className = "text-button";
+    close.textContent = "Close";
+    close.onclick = () => panel.remove();
+    header.appendChild(close);
+    panel.appendChild(header);
+    anchor.insertAdjacentElement("afterend", panel);
+
+    let byPage = new Map<number, PDFSourceLocation[]>();
+    for (let source of sources) {
+        let pageSources = byPage.get(source.rect.page) ?? [];
+        pageSources.push(source);
+        byPage.set(source.rect.page, pageSources);
+    }
+
+    try {
+        let previews = await Promise.all(
+            [...byPage.entries()]
+                .sort(([a], [b]) => a - b)
+                .map(([, pageSources]) => createPDFSourcePreview(combinedPDFSource(pageSources)))
+        );
+        panel.append(...previews);
+    }
+    catch (error) {
+        console.warn("Failed to render the selected PDF areas", error);
+        let message = document.createElement("small");
+        message.textContent = "PDF selection unavailable";
+        panel.appendChild(message);
+    }
+}
+
+function updatePDFSelection() {
+    if (!pdfSelectionButton) {
+        return;
+    }
+    let selection = window.getSelection();
+    let main = document.getElementById("main");
+    if (!selection || selection.isCollapsed || selection.rangeCount == 0 || !main) {
+        pdfSelectionButton.hidden = true;
+        return;
+    }
+
+    let range = selection.getRangeAt(0);
+    let elements = Array.from(main.querySelectorAll<HTMLElement>(
+        ":scope > .source-linked, :scope > figure > figcaption.source-linked"
+    ));
+    let selected = elements.filter((element) => {
+        try {
+            return range.intersectsNode(element) && pdfSourceLocations.has(element);
+        }
+        catch {
+            return false;
+        }
+    });
+    if (selected.length == 0) {
+        pdfSelectionButton.hidden = true;
+        return;
+    }
+
+    selectedPDFSources = selected
+        .map((element) => pdfSourceLocations.get(element))
+        .filter((source): source is PDFSourceLocation => source != null);
+    selectedPDFAnchor = selected[selected.length - 1].closest<HTMLElement>("#main > *") ?? selected[selected.length - 1];
+
+    let rects = range.getClientRects();
+    let rect = rects[rects.length - 1] ?? range.getBoundingClientRect();
+    pdfSelectionButton.hidden = false;
+    let width = pdfSelectionButton.offsetWidth;
+    let height = pdfSelectionButton.offsetHeight;
+    pdfSelectionButton.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.right + 6))}px`;
+    pdfSelectionButton.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, rect.bottom + 6))}px`;
+}
+
+function enablePDFSelection() {
+    document.querySelector(".pdf-selection-preview")?.remove();
+    if (pdfSelectionButton) {
+        pdfSelectionButton.hidden = true;
+        return;
+    }
+
+    let button = document.createElement("button");
+    button.type = "button";
+    button.className = "pdf-selection-button";
+    button.textContent = "PDF selection";
+    button.dataset.exportExclude = "";
+    button.hidden = true;
+    button.onpointerdown = (event) => event.preventDefault();
+    button.onclick = async () => {
+        let sources = [...selectedPDFSources];
+        let anchor = selectedPDFAnchor;
+        button.hidden = true;
+        if (!anchor || sources.length == 0) {
+            return;
+        }
+        button.disabled = true;
+        button.textContent = "Loading PDF…";
+        await showPDFSelection(sources, anchor);
+        button.textContent = "PDF selection";
+        button.disabled = false;
+    };
+    document.body.appendChild(button);
+    pdfSelectionButton = button;
+    document.addEventListener("selectionchange", () => requestAnimationFrame(updatePDFSelection));
+}
+
 function attachPDFSourceToggle(element: HTMLElement) {
     let source = pdfSourceLocations.get(element);
     if (!source) {
@@ -459,46 +622,14 @@ function attachPDFSourceToggle(element: HTMLElement) {
         toggle.disabled = true;
         toggle.textContent = "Loading PDF…";
         try {
-            let pageImage = await sourcePageImage(source.page);
-            if (!pageImage) {
-                throw new Error("Could not render the source PDF area");
-            }
-
-            preview = document.createElement("span");
-            preview.className = "pdf-source-preview";
-            preview.dataset.exportExclude = "";
-
-            let viewport = document.createElement("span");
-            viewport.className = "pdf-source-viewport";
-            viewport.tabIndex = 0;
-            viewport.setAttribute("role", "region");
-            viewport.setAttribute("aria-label", `Source PDF page ${source.rect.page}; drag to move; Control plus wheel to zoom`);
-            let pageElement = document.createElement("span");
-            pageElement.className = "pdf-source-page";
-            let image = document.createElement("img");
-            image.src = pageImage.src;
-            image.alt = `Source PDF page ${source.rect.page}`;
-            image.width = pageImage.width;
-            image.height = pageImage.height;
-            image.draggable = false;
-            let highlight = document.createElement("span");
-            highlight.className = "pdf-source-highlight";
-            pageElement.append(image, highlight);
-            viewport.appendChild(pageElement);
-            let pageLabel = document.createElement("small");
-            pageLabel.textContent = `Page ${source.rect.page} · 100% · Drag to move · Ctrl+wheel to zoom`;
-            preview.append(viewport, pageLabel);
+            preview = await createPDFSourcePreview(source);
             if (element.tagName == "FIGCAPTION" && element.parentElement) {
                 element.parentElement.insertBefore(preview, element);
             }
             else {
                 element.appendChild(preview);
             }
-            layoutPDFSourcePage(pageElement, image, highlight, pageImage, source.rect, 1);
-            enableDragScrolling(viewport);
-            enablePDFSourceZoom(viewport, pageElement, image, highlight, pageImage, source.rect, pageLabel);
             setPDFSourceVisible(toggle, preview, true, source.rect.page);
-            centerPDFSource(viewport, pageImage, source.rect);
         }
         catch (error) {
             console.warn("Failed to render the source PDF area", error);
