@@ -18,6 +18,7 @@ import {
 console.log("initialized.");
 
 const FIGURE_RENDER_SCALE = 4.0;
+const SOURCE_PREVIEW_RENDER_SCALE = 2.0;
 
 interface ChromeTranslator {
     translate(text: string): Promise<string>;
@@ -46,10 +47,27 @@ declare global {
 interface RenderedPageCanvas {
     canvas: HTMLCanvasElement;
     pageHeight: number;
+    scale: number;
 }
 
-async function renderPageCanvas(page: any) {
-    let viewport = page.getViewport({scale: FIGURE_RENDER_SCALE});
+interface PDFSourceLocation {
+    page: any;
+    rect: PDF_Rect;
+}
+
+interface PDFSourcePageImage {
+    src: string;
+    width: number;
+    height: number;
+    pageHeight: number;
+    scale: number;
+}
+
+const pdfSourceLocations = new WeakMap<HTMLElement, PDFSourceLocation>();
+const pdfSourcePageImages = new WeakMap<object, Promise<PDFSourcePageImage | null>>();
+
+async function renderPageCanvas(page: any, scale = FIGURE_RENDER_SCALE) {
+    let viewport = page.getViewport({scale});
     let canvas = document.createElement("canvas");
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
@@ -65,12 +83,13 @@ async function renderPageCanvas(page: any) {
 
     return {
         canvas,
-        pageHeight: page.getViewport({scale: 1}).height
+        pageHeight: page.getViewport({scale: 1}).height,
+        scale
     };
 }
 
 function cropRectFromPage(renderedPage: RenderedPageCanvas, rect: PDF_Rect) {
-    let scale = FIGURE_RENDER_SCALE;
+    let scale = renderedPage.scale;
     let sourceX = Math.max(0, Math.floor(rect.x * scale));
     let sourceY = Math.max(0, Math.floor((renderedPage.pageHeight - rect.y - rect.height) * scale));
     let sourceWidth = Math.min(renderedPage.canvas.width - sourceX, Math.ceil(rect.width * scale));
@@ -105,6 +124,23 @@ function cropRectFromPage(renderedPage: RenderedPageCanvas, rect: PDF_Rect) {
     return crop.toDataURL("image/png");
 }
 
+function sourcePageImage(page: any) {
+    let cached = pdfSourcePageImages.get(page);
+    if (cached) {
+        return cached;
+    }
+
+    let rendered = renderPageCanvas(page, SOURCE_PREVIEW_RENDER_SCALE).then((renderedPage) => renderedPage ? {
+        src: renderedPage.canvas.toDataURL("image/png"),
+        width: renderedPage.canvas.width,
+        height: renderedPage.canvas.height,
+        pageHeight: renderedPage.pageHeight,
+        scale: renderedPage.scale
+    } : null);
+    pdfSourcePageImages.set(page, rendered);
+    return rendered;
+}
+
 async function attachFigureImages(nodes: PDF_Node[], pageProxies: any[]) {
     let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas | null>>();
 
@@ -128,7 +164,18 @@ async function attachFigureImages(nodes: PDF_Node[], pageProxies: any[]) {
     }
 }
 
-function show(nodes: PDF_Node[]) {
+function rememberPDFSource(element: HTMLElement, node: PDF_Node, pageProxies: any[]) {
+    // 図表は図表領域、それ以外は元テキスト領域を表示の中心にする。
+    let rect = node.type == PDF_NodeType.FIGURE
+        ? node.rect ?? node.sourceRect
+        : node.sourceRect ?? node.rect;
+    let page = rect ? pageProxies[rect.page - 1] : null;
+    if (rect && page) {
+        pdfSourceLocations.set(element, {page, rect});
+    }
+}
+
+function show(nodes: PDF_Node[], pageProxies: any[]) {
     let main = document.getElementById("main");
     if (!main) {
         return;
@@ -160,6 +207,8 @@ function show(nodes: PDF_Node[]) {
             let caption = document.createElement("figcaption");
             caption.innerHTML = linkedNodeHTML(node, linkContext);
             caption.style.textAlign = "left";
+            rememberPDFSource(caption, node, pageProxies);
+            attachPDFSourceToggle(caption);
             figure.appendChild(caption);
             main.appendChild(figure);
             continue;
@@ -170,6 +219,8 @@ function show(nodes: PDF_Node[]) {
             div.id = id;
         }
         div.innerHTML = linkedNodeHTML(node, linkContext);
+        rememberPDFSource(div, node, pageProxies);
+        attachPDFSourceToggle(div);
         main.appendChild(div);
     }
 
@@ -245,7 +296,13 @@ function enableHTMLExport(pdfURL: string) {
 function translatableElements() {
     return Array.from(document.querySelectorAll<HTMLElement>(
         "#main > p, #main > h1, #main > h2, #main > h3, #main > h4, #main > h5, #main > h6, #main > figcaption, #main > figure > figcaption"
-    )).filter((element) => (element.textContent?.trim().length ?? 0) > 0);
+    )).filter((element) => translatableText(element) != "");
+}
+
+function translatableText(element: HTMLElement) {
+    let source = element.cloneNode(true) as HTMLElement;
+    source.querySelectorAll("[data-export-exclude]").forEach((excluded) => excluded.remove());
+    return source.textContent?.trim() ?? "";
 }
 
 function setElementOriginalVisible(element: HTMLElement, visible: boolean) {
@@ -262,7 +319,143 @@ function setElementOriginalVisible(element: HTMLElement, visible: boolean) {
     toggle.setAttribute("aria-expanded", String(visible));
 }
 
+function setPDFSourceVisible(toggle: HTMLButtonElement, preview: HTMLElement, visible: boolean, page: number) {
+    preview.hidden = !visible;
+    toggle.textContent = visible ? "Hide PDF" : "PDF";
+    toggle.setAttribute("aria-label", visible ? `Hide source PDF page ${page}` : `Show source PDF page ${page}`);
+    toggle.setAttribute("aria-expanded", String(visible));
+}
+
+function enableDragScrolling(viewport: HTMLElement) {
+    let pointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    viewport.onpointerdown = (event) => {
+        if (event.button != 0) {
+            return;
+        }
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        startLeft = viewport.scrollLeft;
+        startTop = viewport.scrollTop;
+        viewport.setPointerCapture(pointerId);
+        viewport.classList.add("dragging");
+        event.preventDefault();
+    };
+    viewport.onpointermove = (event) => {
+        if (pointerId != event.pointerId) {
+            return;
+        }
+        viewport.scrollLeft = startLeft - (event.clientX - startX);
+        viewport.scrollTop = startTop - (event.clientY - startY);
+    };
+    let stopDragging = (event: PointerEvent) => {
+        if (pointerId != event.pointerId) {
+            return;
+        }
+        if (viewport.hasPointerCapture(pointerId)) {
+            viewport.releasePointerCapture(pointerId);
+        }
+        pointerId = null;
+        viewport.classList.remove("dragging");
+    };
+    viewport.onpointerup = stopDragging;
+    viewport.onpointercancel = stopDragging;
+}
+
+function centerPDFSource(viewport: HTMLElement, page: PDFSourcePageImage, rect: PDF_Rect) {
+    let centerX = (rect.x + rect.width / 2) * page.scale;
+    let centerY = (page.pageHeight - rect.y - rect.height / 2) * page.scale;
+    viewport.scrollLeft = centerX - viewport.clientWidth / 2;
+    viewport.scrollTop = centerY - viewport.clientHeight / 2;
+}
+
+function attachPDFSourceToggle(element: HTMLElement) {
+    let source = pdfSourceLocations.get(element);
+    if (!source) {
+        return;
+    }
+
+    let toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "text-button paragraph-toggle pdf-source-toggle";
+    toggle.textContent = "PDF";
+    toggle.dataset.exportExclude = "";
+    toggle.setAttribute("aria-label", `Show source PDF page ${source.rect.page}`);
+    toggle.setAttribute("aria-expanded", "false");
+
+    let preview: HTMLElement | null = null;
+    toggle.onclick = async () => {
+        if (preview) {
+            setPDFSourceVisible(toggle, preview, preview.hasAttribute("hidden"), source.rect.page);
+            return;
+        }
+
+        toggle.disabled = true;
+        toggle.textContent = "Loading PDF…";
+        try {
+            let pageImage = await sourcePageImage(source.page);
+            if (!pageImage) {
+                throw new Error("Could not render the source PDF area");
+            }
+
+            preview = document.createElement("span");
+            preview.className = "pdf-source-preview";
+            preview.dataset.exportExclude = "";
+
+            let viewport = document.createElement("span");
+            viewport.className = "pdf-source-viewport";
+            viewport.tabIndex = 0;
+            viewport.setAttribute("role", "region");
+            viewport.setAttribute("aria-label", `Source PDF page ${source.rect.page}; drag to move`);
+            let page = document.createElement("span");
+            page.className = "pdf-source-page";
+            page.style.width = `${pageImage.width}px`;
+            page.style.height = `${pageImage.height}px`;
+            let image = document.createElement("img");
+            image.src = pageImage.src;
+            image.alt = `Source PDF page ${source.rect.page}`;
+            image.width = pageImage.width;
+            image.height = pageImage.height;
+            image.draggable = false;
+            let highlight = document.createElement("span");
+            highlight.className = "pdf-source-highlight";
+            highlight.style.left = `${source.rect.x * pageImage.scale}px`;
+            highlight.style.top = `${(pageImage.pageHeight - source.rect.y - source.rect.height) * pageImage.scale}px`;
+            highlight.style.width = `${source.rect.width * pageImage.scale}px`;
+            highlight.style.height = `${source.rect.height * pageImage.scale}px`;
+            page.append(image, highlight);
+            viewport.appendChild(page);
+            let pageLabel = document.createElement("small");
+            pageLabel.textContent = `Page ${source.rect.page} · Drag to move`;
+            preview.append(viewport, pageLabel);
+            element.appendChild(preview);
+            enableDragScrolling(viewport);
+            setPDFSourceVisible(toggle, preview, true, source.rect.page);
+            centerPDFSource(viewport, pageImage, source.rect);
+        }
+        catch (error) {
+            console.warn("Failed to render the source PDF area", error);
+            toggle.textContent = "PDF unavailable";
+        }
+        finally {
+            toggle.disabled = false;
+        }
+    };
+    element.classList.add("source-linked");
+    element.appendChild(toggle);
+}
+
 function attachTranslation(element: HTMLElement, translatedText: string) {
+    let pdfToggle = element.querySelector<HTMLElement>(":scope > .pdf-source-toggle");
+    let pdfPreview = element.querySelector<HTMLElement>(":scope > .pdf-source-preview");
+    pdfToggle?.remove();
+    pdfPreview?.remove();
+
     let original = document.createElement("span");
     original.className = "translation-original";
     original.lang = "en";
@@ -277,12 +470,18 @@ function attachTranslation(element: HTMLElement, translatedText: string) {
 
     let toggle = document.createElement("button");
     toggle.type = "button";
-    toggle.className = "text-button translation-toggle";
+    toggle.className = "text-button paragraph-toggle translation-toggle";
     toggle.onclick = () => setElementOriginalVisible(element, original.hasAttribute("hidden"));
 
     element.classList.add("translatable");
     element.lang = "ja";
-    element.append(translated, toggle, original);
+    element.append(
+        translated,
+        toggle,
+        ...(pdfToggle ? [pdfToggle] : []),
+        original,
+        ...(pdfPreview ? [pdfPreview] : [])
+    );
     setElementOriginalVisible(element, false);
 }
 
@@ -340,7 +539,7 @@ async function translateDocument() {
             progress.value = 0;
         }
         for (let [index, element] of elements.entries()) {
-            let sourceText = element.textContent?.trim() ?? "";
+            let sourceText = translatableText(element);
             try {
                 attachTranslation(element, await translator.translate(sourceText));
             }
@@ -460,7 +659,7 @@ export function loadPDF(source: string, sourceName = source, options: PDFLoadOpt
         }
         let nodes = extractNodesFromPages(pages);
         await attachFigureImages(nodes, pageProxies);
-        show(nodes);
+        show(nodes, pageProxies);
         if (progress) {
             progress.hidden = true;
         }

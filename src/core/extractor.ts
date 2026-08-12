@@ -66,14 +66,19 @@ export class PDF_Node {
     type: PDF_NodeType;
     // 図表ノードの場合、PDF ページから切り出す矩形。
     rect?: PDF_Rect;
+    // このノードの元テキストがある範囲。PDF 上の原文表示に使う。
+    sourceRect?: PDF_Rect;
     // CLI/viewer が rect から生成した画像。extractor 自体は画像生成を行わない。
     imageSrc?: string;
 
-    constructor(str: string, type: PDF_NodeType, rect?: PDF_Rect) {
+    constructor(str: string, type: PDF_NodeType, rect?: PDF_Rect, sourceRect?: PDF_Rect) {
         this.str = str;
         this.type = type;
         if (rect) {
             this.rect = rect;
+        }
+        if (sourceRect) {
+            this.sourceRect = sourceRect;
         }
     }
 };
@@ -561,6 +566,21 @@ function lineWithText(line: TextLine, text: string): TextLine {
         ...line,
         text
     };
+}
+
+// 複数ページにまたがる段落では、先頭ページ側のテキスト範囲を代表位置として返す。
+function sourceRectFromLines(lines: TextLine[]) {
+    let page = lines[0]?.page;
+    let pageLines = lines.filter((line) => line.page == page);
+    if (page == null || pageLines.length == 0) {
+        return undefined;
+    }
+
+    let x = Math.min(...pageLines.map((line) => line.x));
+    let right = Math.max(...pageLines.map((line) => line.x + line.width));
+    let y = Math.min(...pageLines.map((line) => line.y - line.fontSize * 0.25));
+    let top = Math.max(...pageLines.map((line) => line.y + line.fontSize));
+    return {page, x, y, width: right - x, height: top - y};
 }
 
 // 1 ページ分の TextItem を y 座標でまとめ、TextLine に復元する。
@@ -1464,7 +1484,7 @@ function moveInterruptedFiguresAfterParagraphs(nodes: PDF_Node[]) {
             cursor++;
         }
 
-        result.push(new PDF_Node(text, PDF_NodeType.TEXT), ...delayedFigures);
+        result.push(new PDF_Node(text, PDF_NodeType.TEXT, undefined, node.sourceRect), ...delayedFigures);
         i = cursor;
     }
 
@@ -3136,7 +3156,8 @@ function collectFigureCandidates(
                 node: new PDF_Node(
                     caption,
                     PDF_NodeType.FIGURE,
-                    estimateAlgorithmRect(line, lines, i, bodyFontSize, columnWidth, metric) ?? undefined
+                    estimateAlgorithmRect(line, lines, i, bodyFontSize, columnWidth, metric) ?? undefined,
+                    sourceRectFromLines([line])
                 )
             });
             continue;
@@ -3234,7 +3255,12 @@ function collectFigureCandidates(
             startIndex: i,
             endIndex,
             captionLines: lines.slice(i, endIndex + 1),
-            node: new PDF_Node(caption, PDF_NodeType.FIGURE, rect ?? undefined)
+            node: new PDF_Node(
+                caption,
+                PDF_NodeType.FIGURE,
+                rect ?? undefined,
+                sourceRectFromLines(lines.slice(i, endIndex + 1))
+            )
         });
     }
 
@@ -3317,23 +3343,27 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
 
     let nodes: PDF_Node[] = [];
     let title = "";
+    let titleLines: TextLine[] = [];
     let paragraph = "";
+    let paragraphLines: TextLine[] = [];
     let prevTextLine: TextLine | null = null;
     let inReferencesSection = false;
 
     // 複数行に分かれたタイトルを 1 つのノードにまとめる。
     function flushTitle() {
         if (title != "") {
-            nodes.push(new PDF_Node(title, PDF_NodeType.TITLE));
+            nodes.push(new PDF_Node(title, PDF_NodeType.TITLE, undefined, sourceRectFromLines(titleLines)));
             title = "";
+            titleLines = [];
         }
     }
 
     // 連結中の本文段落を確定する。
     function flushParagraph() {
         if (paragraph != "") {
-            nodes.push(new PDF_Node(paragraph, PDF_NodeType.TEXT));
+            nodes.push(new PDF_Node(paragraph, PDF_NodeType.TEXT, undefined, sourceRectFromLines(paragraphLines)));
             paragraph = "";
+            paragraphLines = [];
         }
     }
 
@@ -3372,13 +3402,14 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         if (isTitleLine(line, bodyFontSize)) {
             flushParagraph();
             title = appendLineText(title, line.text);
+            titleLines.push(line);
             prevTextLine = null;
             inReferencesSection = false;
         }
         else if (isHeadingLine(line, bodyFontSize)) {
             flushTitle();
             flushParagraph();
-            nodes.push(new PDF_Node(line.text, PDF_NodeType.HEADING));
+            nodes.push(new PDF_Node(line.text, PDF_NodeType.HEADING, undefined, sourceRectFromLines([line])));
             prevTextLine = null;
             inReferencesSection = isReferencesHeading(line.text);
         }
@@ -3388,6 +3419,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
                 flushParagraph();
             }
             paragraph = appendLineText(paragraph, line.text);
+            paragraphLines.push(line);
             prevTextLine = line;
         }
     }
