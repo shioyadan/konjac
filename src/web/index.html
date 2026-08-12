@@ -38,6 +38,10 @@
         #progress::-webkit-progress-bar { background: #dbeafe; }
         #progress::-webkit-progress-value { background: #0d6efd; }
         #progress::-moz-progress-bar { background: #0d6efd; }
+        .licenses { margin: 2rem 0 1rem; color: #6c757d; font-size: 0.75rem; }
+        .licenses summary { width: fit-content; color: #495057; cursor: pointer; }
+        .licenses h2 { margin-top: 1rem; font-size: 1rem; }
+        .license-text { max-height: 18rem; margin: 0; padding: 0.75rem; overflow: auto; background: #f8f9fa; border: 1px solid #dee2e6; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         @media (hover: none) { .translation-toggle { opacity: 0.6; } }
         @media (min-width: 768px) {
             .viewer-container { max-width: 720px; }
@@ -79,6 +83,17 @@
                 </div>
                 <progress id="progress" data-export-exclude aria-label="Loading PDF" hidden></progress>
                 <div id="main"></div>
+                <footer class="licenses" data-export-exclude>
+                    <details>
+                        <summary>Licenses</summary>
+                        <h2>Konjac</h2>
+                        <pre class="license-text"><%= htmlWebpackPlugin.options.licenses.konjac %></pre>
+                        <h2>PDF.js</h2>
+                        <pre class="license-text"><%= htmlWebpackPlugin.options.licenses.pdfjs %></pre>
+                        <h2>PDF.js CMaps</h2>
+                        <pre class="license-text"><%= htmlWebpackPlugin.options.licenses.cmaps %></pre>
+                    </details>
+                </footer>
             </div>
             <div class="viewer-side"></div>
         </div>

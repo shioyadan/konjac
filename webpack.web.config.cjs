@@ -1,9 +1,17 @@
 // 通常の Web ページ向けのバンドル設定
 
+const fs = require("node:fs");
 const path = require("node:path");
 const HtmlInlineScriptPlugin = require("html-inline-script-webpack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const TerserPlugin = require("terser-webpack-plugin");
+
+function readLicense(relativePath) {
+    return fs.readFileSync(path.resolve(__dirname, relativePath), "utf8")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+}
 
 module.exports = (_env, argv) => {
     const isProduction = argv.mode === "production";
@@ -60,7 +68,12 @@ module.exports = (_env, argv) => {
                 filename: "index.html",
                 inject: "body",
                 scriptLoading: "defer",
-                minify: isProduction
+                minify: isProduction,
+                licenses: {
+                    konjac: readLicense("LICENSE.md"),
+                    pdfjs: readLicense("node_modules/pdfjs-dist/LICENSE"),
+                    cmaps: readLicense("node_modules/pdfjs-dist/cmaps/LICENSE")
+                }
             }),
             ...(isProduction ? [new HtmlInlineScriptPlugin()] : [])
         ]
