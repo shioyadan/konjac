@@ -680,6 +680,21 @@ async function showPDFImagesInline(
         elements[0].contains(range.endContainer);
     panel.remove();
     window.getSelection()?.removeAllRanges();
+    let figure = range == null && elements.length == 1 && elements[0].closest<HTMLElement>("figure");
+    if (figure && elements[0].tagName == "FIGCAPTION") {
+        let originalImages = Array.from(figure.querySelectorAll<HTMLImageElement>(":scope > img"));
+        let hiddenStates = originalImages.map((image) => image.hidden);
+        replacement.classList.add("pdf-inline-source-block", "pdf-inline-figure");
+        restore.textContent = "Restore image";
+        figure.insertBefore(replacement, elements[0]);
+        originalImages.forEach((image) => image.hidden = true);
+        restore.onclick = () => {
+            originalImages.forEach((image, index) => image.hidden = hiddenStates[index]);
+            replacement.remove();
+        };
+        return;
+    }
+
     if (exactInlineRange && range) {
         let original = range.extractContents();
         range.insertNode(replacement);
@@ -830,6 +845,9 @@ function enablePDFSelection() {
         if (!anchor || !range || sources.length == 0 || elements.length == 0) {
             return;
         }
+        // 選択範囲は cloneRange() で保持済みなので、追加する PDF パネルまで
+        // ブラウザの選択表示に巻き込まれないよう画面上の選択だけ解除する。
+        window.getSelection()?.removeAllRanges();
         button.disabled = true;
         button.textContent = "Loading PDF…";
         await showPDFSelection(sources, elements, anchor, range);
