@@ -10,6 +10,7 @@ export interface RecentFile {
     openedAt: number;
 }
 
+// 値がRecentFileとして利用できるか検証する。localStorageには旧形式や不正な値が入り得る。
 function isRecentFile(value: unknown): value is RecentFile {
     if (!value || typeof value != "object") {
         return false;
@@ -20,6 +21,7 @@ function isRecentFile(value: unknown): value is RecentFile {
         typeof file.openedAt == "number" && Number.isFinite(file.openedAt);
 }
 
+// localStorageから最近開いたファイルを取得する。読み出し失敗は空の履歴として扱う。
 export function recentFiles() {
     try {
         let parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
@@ -30,6 +32,7 @@ export function recentFiles() {
     }
 }
 
+// 最近開いたファイルを保存する。同じkeyは重複させず、閲覧時刻を更新して先頭へ移動する。
 export function rememberRecentFile(file: Omit<RecentFile, "openedAt">) {
     let files = recentFiles().filter((recent) => recent.key != file.key);
     files = [{...file, openedAt: Date.now()}, ...files].slice(0, MAX_RECENT_FILES);
@@ -42,6 +45,7 @@ export function rememberRecentFile(file: Omit<RecentFile, "openedAt">) {
     return files;
 }
 
+// 最近開いたファイルの一覧を描画する。拡張とWeb版で表示を共有し、開き方だけを差し替える。
 export function renderRecentFileList<T extends RecentFile>(openFile: (file: T) => void, files: readonly T[]) {
     let details = document.getElementById("recent-files");
     let list = document.getElementById("recent-file-list");
@@ -68,6 +72,7 @@ export function renderRecentFileList<T extends RecentFile>(openFile: (file: T) =
     }));
 }
 
+// URLまたはパスから表示用のファイル名を得る。URLではパーセントエンコードも元に戻す。
 export function recentFileName(source: string) {
     try {
         let url = new URL(source);

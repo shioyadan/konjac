@@ -6,6 +6,7 @@ import {recentFileName, recentFiles, rememberRecentFile, renderRecentFileList} f
 
 pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url), {type: "module"});
 
+// 拡張のファイル履歴を描画する。選択時はviewer URLを組み直して同じ画面で開き直す。
 function renderRecentFiles() {
     renderRecentFileList((file) => {
         let viewerURL = new URL(location.href);

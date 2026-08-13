@@ -14,6 +14,7 @@ export interface RecentFileHandle extends RecentFile {
     handle: FileSystemFileHandle;
 }
 
+// IndexedDB requestの結果をPromiseとして返し、呼び出し側でawaitできるようにする。
 function requestResult<T>(request: IDBRequest<T>) {
     return new Promise<T>((resolve, reject) => {
         request.onsuccess = () => resolve(request.result);
@@ -21,6 +22,7 @@ function requestResult<T>(request: IDBRequest<T>) {
     });
 }
 
+// IndexedDB transactionの完了を待つ。個々のrequest成功後にもtransactionは失敗し得る。
 function transactionFinished(transaction: IDBTransaction) {
     return new Promise<void>((resolve, reject) => {
         transaction.oncomplete = () => resolve();
@@ -28,6 +30,7 @@ function transactionFinished(transaction: IDBTransaction) {
     });
 }
 
+// 履歴用のIndexedDBを開き、初回はobject storeを作成する。
 function openDatabase() {
     return new Promise<IDBDatabase>((resolve, reject) => {
         let request = indexedDB.open(DATABASE_NAME, 1);
@@ -41,6 +44,7 @@ function openDatabase() {
     });
 }
 
+// 値が再読込可能なRecentFileHandleか検証する。IndexedDBには旧形式の値も残り得る。
 function isRecentFileHandle(value: unknown): value is RecentFileHandle {
     if (!value || typeof value != "object") {
         return false;
@@ -53,6 +57,7 @@ function isRecentFileHandle(value: unknown): value is RecentFileHandle {
         typeof record.handle.isSameEntry == "function";
 }
 
+// IndexedDBからファイル履歴を読み、閲覧時刻順に上限件数まで返す。
 export async function loadRecentFileHandles() {
     if (!("indexedDB" in globalThis)) {
         return [];
@@ -72,6 +77,7 @@ export async function loadRecentFileHandles() {
     }
 }
 
+// ファイルハンドルを履歴へ保存する。isSameEntryで同名の別ファイルを区別する。
 export async function rememberRecentFileHandle(handle: FileSystemFileHandle) {
     let previous = await loadRecentFileHandles();
     let matchingKey: string | undefined;
@@ -110,6 +116,7 @@ export async function rememberRecentFileHandle(handle: FileSystemFileHandle) {
     }
 }
 
+// 指定したファイル履歴をIndexedDBから削除する。移動・削除済みの項目の除去に使用する。
 export async function removeRecentFileHandle(key: string) {
     let database = await openDatabase();
     try {
@@ -123,6 +130,7 @@ export async function removeRecentFileHandle(key: string) {
     }
 }
 
+// 保存済みhandleから現在のFileを取得する。権限が失効していれば再許可を要求する。
 export async function readRecentFile(handle: FileSystemFileHandle, onPermissionNeeded?: () => void) {
     let persistentHandle = handle as PersistentFileHandle;
     let permission = await persistentHandle.queryPermission?.({mode: "read"}) ?? "granted";
@@ -137,16 +145,19 @@ export async function readRecentFile(handle: FileSystemFileHandle, onPermissionN
     return handle.getFile();
 }
 
+// 永続化可能なhandleを返すファイルpickerに対応しているか判定する。
 export function supportsPersistentFilePicker() {
     return typeof (globalThis as typeof globalThis & {showOpenFilePicker?: unknown}).showOpenFilePicker == "function";
 }
 
+// 現在の環境で永続ファイル履歴を安全に使えるか判定する。既知の停止条件では無効化する。
 export function supportsPersistentFileHistory() {
     // ChromiumはWSL UNC上のfile:ページから復元したhandleへのアクセスを完了できない。
     // Windows側file:、localhost、HTTPSでは同じFile System Accessフローを利用できる。
     return supportsPersistentFilePicker() && !(location.protocol == "file:" && location.hostname == "wsl.localhost");
 }
 
+// PDF選択用のpickerを開き、IndexedDBへ保存可能なFileSystemFileHandleを返す。
 export async function pickPDFFileHandle() {
     let showOpenFilePicker = (globalThis as typeof globalThis & {
         showOpenFilePicker(options: unknown): Promise<readonly FileSystemFileHandle[]>;

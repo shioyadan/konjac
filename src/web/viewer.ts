@@ -26,6 +26,7 @@ let sourceControls = document.getElementById("pdf-source-controls");
 let status = document.getElementById("web-status");
 let openingPDF = false;
 
+// Web版のファイル履歴を読み込んで描画する。失敗しても通常のPDF選択は使用可能にする。
 async function renderRecentFiles(files?: readonly RecentFileHandle[]) {
     if (!supportsPersistentFileHistory()) {
         renderRecentFileList(() => undefined, []);
@@ -40,6 +41,7 @@ async function renderRecentFiles(files?: readonly RecentFileHandle[]) {
     }
 }
 
+// 読込状況のメッセージとエラー表示を更新する。status要素は読み上げの対象にもなる。
 function setStatus(message: string, error = false) {
     if (status) {
         status.textContent = message;
@@ -47,12 +49,14 @@ function setStatus(message: string, error = false) {
     }
 }
 
+// PDF読込中の状態を切り替える。同時に履歴ボタンを無効化し、別の読込との競合を防ぐ。
 function setOpening(opening: boolean) {
     openingPDF = opening;
     document.querySelectorAll<HTMLButtonElement>("#recent-file-list button")
         .forEach((button) => button.disabled = opening);
 }
 
+// ローカルのFileをPDFとして表示する。すべてのファイル選択経路がこの処理を共有する。
 async function openLocalPDF(file: File | undefined, handle?: FileSystemFileHandle) {
     if (!file) {
         return;
@@ -90,6 +94,7 @@ async function openLocalPDF(file: File | undefined, handle?: FileSystemFileHandl
     }
 }
 
+// 永続化対応のpickerからPDFを選択して開く。取得したhandleは履歴へ保存される。
 async function openPersistentPDF() {
     if (openingPDF) {
         return;
@@ -112,6 +117,7 @@ async function openPersistentPDF() {
     }
 }
 
+// 履歴に保存したhandleからPDFを開く。消失したファイルは履歴から自動的に削除する。
 async function openRecentPDF(record: RecentFileHandle) {
     if (openingPDF) {
         return;
