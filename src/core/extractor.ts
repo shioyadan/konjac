@@ -3446,15 +3446,22 @@ function collectFigureCandidates(
     return candidates;
 }
 
-// 独立した式番号は本文の列右端に置かれるため、括弧付き番号だけを数式探索の起点にする。
+// PDF由来の不可視文字を除き、単独または式本体の行末にある括弧付き番号を探索の起点にする。
 function isEquationNumberLine(line: TextLine) {
-    return /^\(\d+[a-z]?\)$/.test(line.text.trim());
+    let text = line.text.replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "").trim();
+    return /\(\d+[a-z]?\)$/.test(text);
+}
+
+// 行末番号を含む式本体と、番号だけが独立した行を区別する。
+function isStandaloneEquationNumberLine(line: TextLine) {
+    let text = line.text.replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "").trim();
+    return /^\(\d+[a-z]?\)$/.test(text);
 }
 
 // 等号や主要な演算記号を含む短い行を、表示数式の本体候補として扱う。
 function isEquationRelationLine(line: TextLine, columnWidth: number) {
     return line.width <= columnWidth * 1.05 &&
-        /(?:=|[≤≥≠≈≃≡×÷∑∏√])/.test(line.text);
+        /(?:=|[≤≥≠≈≃≡×÷∑∏√⊕⊗∧∨˄˅])/.test(line.text);
 }
 
 // 数式番号から上方向へ連続する式行を集め、上付き・下付きも含む一枚の切り出し領域を作る。
@@ -3475,20 +3482,22 @@ function collectEquationCandidates(
         if (
             !metric ||
             !isEquationNumberLine(anchor) ||
+            (!isStandaloneEquationNumberLine(anchor) && !isEquationRelationLine(anchor, columnWidth)) ||
             excludedRects.some((rect) => lineCenterInsideRect(anchor, rect))
         ) {
             continue;
         }
 
-        let centerX = anchor.x + anchor.width / 2;
+        // 式本体と番号が同じ TextLine の場合もあるため、行中心ではなく右端でカラムを決める。
+        let numberRight = anchor.x + anchor.width;
         let columns = bodyLayout.columns.filter((column) => column.page == anchor.page);
         let column = columns
             .filter((candidate) =>
-                centerX >= candidate.x + columnWidth * 0.7 &&
-                centerX <= candidate.x + columnWidth * 1.15
+                numberRight >= candidate.x + columnWidth * 0.7 &&
+                numberRight <= candidate.x + columnWidth * 1.15
             )
             .sort((a, b) =>
-                Math.abs(a.x + columnWidth - centerX) - Math.abs(b.x + columnWidth - centerX)
+                Math.abs(a.x + columnWidth - numberRight) - Math.abs(b.x + columnWidth - numberRight)
             )[0];
         if (!column) {
             continue;
@@ -3500,7 +3509,7 @@ function collectEquationCandidates(
             .map((line, index) => ({line, index}))
             .filter(({line}) =>
                 line.page == anchor.page &&
-                line.y >= anchor.y - bodyFontSize * 0.5 &&
+                line.y >= anchor.y - bodyFontSize * 5 &&
                 line.y <= anchor.y + bodyFontSize * 5 &&
                 line.x + line.width / 2 >= columnLeft &&
                 line.x + line.width / 2 <= columnRight &&
@@ -3508,16 +3517,31 @@ function collectEquationCandidates(
             )
             .sort((a, b) => a.line.y - b.line.y);
 
-        // 複数行式は baseline 間隔が本文の約2行分以内で連続する。
-        let relationLines: Array<{line: TextLine; index: number}> = [];
-        let previousY = anchor.y;
-        for (let relation of nearbyRelations) {
-            if (relation.line.y - previousY > bodyFontSize * 2.2) {
-                break;
+        // 式番号の上下にある関係式のうち、baseline 間隔が連続するまとまりだけを採用する。
+        let anchorRelationIndex = 0;
+        for (let index = 1; index < nearbyRelations.length; index++) {
+            if (
+                Math.abs(nearbyRelations[index].line.y - anchor.y) <
+                Math.abs(nearbyRelations[anchorRelationIndex].line.y - anchor.y)
+            ) {
+                anchorRelationIndex = index;
             }
-            relationLines.push(relation);
-            previousY = relation.line.y;
         }
+        let relationStart = anchorRelationIndex;
+        let relationEnd = anchorRelationIndex + 1;
+        while (
+            relationStart > 0 &&
+            nearbyRelations[relationStart].line.y - nearbyRelations[relationStart - 1].line.y <= bodyFontSize * 2.2
+        ) {
+            relationStart--;
+        }
+        while (
+            relationEnd < nearbyRelations.length &&
+            nearbyRelations[relationEnd].line.y - nearbyRelations[relationEnd - 1].line.y <= bodyFontSize * 2.2
+        ) {
+            relationEnd++;
+        }
+        let relationLines = nearbyRelations.slice(relationStart, relationEnd);
         if (relationLines.length == 0) {
             continue;
         }
