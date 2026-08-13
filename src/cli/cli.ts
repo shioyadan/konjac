@@ -155,11 +155,15 @@ function cropRectFromPage(renderedPage: RenderedPageCanvas, rect: PDF_Rect) {
     return crop.toDataURL("image/png");
 }
 
-async function attachFigureImages(nodes: PDF_Node[], pageProxies: any[]) {
+// 図表と数式の bbox を同じページ描画から切り出し、HTML 用 PNG を付与する。
+async function attachNodeImages(nodes: PDF_Node[], pageProxies: any[]) {
     let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas>>();
 
     for (let node of nodes) {
-        if (node.type != PDF_NodeType.FIGURE || !node.rect) {
+        if (
+            (node.type != PDF_NodeType.FIGURE && node.type != PDF_NodeType.EQUATION) ||
+            !node.rect
+        ) {
             continue;
         }
 
@@ -208,7 +212,7 @@ async function extractPDFFile(fileName: string, renderImages: boolean, debugMask
     };
     let nodes = extractNodesFromPages(pages, debugMaskDir || debugScanCaption ? extractOptions : undefined);
     if (renderImages) {
-        await attachFigureImages(nodes, pageProxies);
+        await attachNodeImages(nodes, pageProxies);
     }
     return nodes;
 }

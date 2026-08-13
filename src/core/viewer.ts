@@ -146,11 +146,15 @@ function sourcePageImage(page: any) {
     return rendered;
 }
 
-async function attachFigureImages(nodes: PDF_Node[], pageProxies: any[]) {
+// 図表と数式の bbox を同じページ描画から切り出し、表示用 PNG を付与する。
+async function attachNodeImages(nodes: PDF_Node[], pageProxies: any[]) {
     let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas | null>>();
 
     for (let node of nodes) {
-        if (node.type != PDF_NodeType.FIGURE || !node.rect) {
+        if (
+            (node.type != PDF_NodeType.FIGURE && node.type != PDF_NodeType.EQUATION) ||
+            !node.rect
+        ) {
             continue;
         }
 
@@ -170,8 +174,8 @@ async function attachFigureImages(nodes: PDF_Node[], pageProxies: any[]) {
 }
 
 function rememberPDFSource(element: HTMLElement, node: PDF_Node, pageProxies: any[]) {
-    // 図表は図表領域、それ以外は元テキスト領域を表示の中心にする。
-    let rect = node.type == PDF_NodeType.FIGURE
+    // 図表・数式は画像領域、それ以外は元テキスト領域を表示の中心にする。
+    let rect = node.type == PDF_NodeType.FIGURE || node.type == PDF_NodeType.EQUATION
         ? node.rect ?? node.sourceRect
         : node.sourceRect ?? node.rect;
     let page = rect ? pageProxies[rect.page - 1] : null;
@@ -215,6 +219,27 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
             rememberPDFSource(caption, node, pageProxies);
             attachPDFSourceToggle(caption);
             figure.appendChild(caption);
+            main.appendChild(figure);
+            continue;
+        }
+        if (node.type == PDF_NodeType.EQUATION) {
+            let figure = document.createElement("figure");
+            figure.className = "equation";
+            figure.style.margin = "1rem 0";
+            if (node.imageSrc) {
+                let image = document.createElement("img");
+                image.src = node.imageSrc;
+                image.alt = node.str;
+                image.style.display = "block";
+                image.style.width = figureImageDisplayWidth(node.rect);
+                image.style.maxWidth = "100%";
+                image.style.height = "auto";
+                image.style.margin = "0 auto";
+                figure.appendChild(image);
+            }
+            else {
+                figure.textContent = node.str;
+            }
             main.appendChild(figure);
             continue;
         }
@@ -1112,7 +1137,7 @@ export function loadPDF(source: string, sourceName = source, options: PDFLoadOpt
             }
         }
         let nodes = extractNodesFromPages(pages);
-        await attachFigureImages(nodes, pageProxies);
+        await attachNodeImages(nodes, pageProxies);
         show(nodes, pageProxies);
         if (progress) {
             progress.hidden = true;

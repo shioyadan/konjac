@@ -7,7 +7,7 @@
 //   3. 文書全体から本文フォントサイズと本文幅を推定する。
 //   4. ページ番号などの一般的な装飾を落とし、読み順を 2 段組み前提で整える。
 //   5. Figure/Table/Algorithm キャプションから bitmap scan で図表領域を推定し、その領域内の文字行を本文から外す。
-//   6. フォントサイズと文字列パターンから title/heading/figure/text に分類する。
+//   6. フォントサイズと文字列パターンから title/heading/figure/equation/text に分類する。
 //   7. 連続する本文行を段落にまとめる。
 //   8. 図表をまたいで分割された段落を結合し、HTML タグへ対応づける。
 
@@ -21,7 +21,9 @@ export enum PDF_NodeType {
     // Figure/Table のキャプション。
     CAPTION = 4,
     // Figure/Table を PDF ページから切り出して表示するためのノード。
-    FIGURE = 5
+    FIGURE = 5,
+    // 番号付き数式を PDF ページから切り出して表示するためのノード。
+    EQUATION = 6
 };
 
 // PDF ページ上の矩形。PDF.js の page.render で切り出すため、座標系は PDF と同じ左下原点。
@@ -62,9 +64,9 @@ export interface PDF_PageInput {
 export class PDF_Node {
     // ノード内のプレーンテキスト。
     str: string;
-    // 本文、タイトル、見出し、キャプション、図表の種別。
+    // 本文、タイトル、見出し、キャプション、図表、数式の種別。
     type: PDF_NodeType;
-    // 図表ノードの場合、PDF ページから切り出す矩形。
+    // 図表・数式ノードの場合、PDF ページから切り出す矩形。
     rect?: PDF_Rect;
     // このノードの元テキストがある範囲。PDF 上の原文表示に使う。
     sourceRect?: PDF_Rect;
@@ -175,6 +177,16 @@ interface FigureCandidate {
     // この図表ノードにまとめたキャプション行。
     captionLines: TextLine[];
     // 出力する図表ノード。
+    node: PDF_Node;
+}
+
+// 右端の式番号を起点に、同じ表示数式へ属する行をまとめた候補。
+interface EquationCandidate {
+    // 読み順配列で最初に現れる数式行。
+    startIndex: number;
+    // 本文抽出から除外する、数式を構成する全行。
+    lineIndices: number[];
+    // PDF ページから切り出して表示する数式ノード。
     node: PDF_Node;
 }
 
@@ -3434,6 +3446,125 @@ function collectFigureCandidates(
     return candidates;
 }
 
+// 独立した式番号は本文の列右端に置かれるため、括弧付き番号だけを数式探索の起点にする。
+function isEquationNumberLine(line: TextLine) {
+    return /^\(\d+[a-z]?\)$/.test(line.text.trim());
+}
+
+// 等号や主要な演算記号を含む短い行を、表示数式の本体候補として扱う。
+function isEquationRelationLine(line: TextLine, columnWidth: number) {
+    return line.width <= columnWidth * 1.05 &&
+        /(?:=|[≤≥≠≈≃≡×÷∑∏√])/.test(line.text);
+}
+
+// 数式番号から上方向へ連続する式行を集め、上付き・下付きも含む一枚の切り出し領域を作る。
+function collectEquationCandidates(
+    lines: TextLine[],
+    bodyFontSize: number,
+    columnWidth: number,
+    pageMetrics: Map<number, PageMetrics>,
+    bodyLayout: BodyLayoutModel,
+    excludedRects: PDF_Rect[]
+) {
+    let candidates: EquationCandidate[] = [];
+    let usedLineIndices = new Set<number>();
+
+    for (let anchorIndex = 0; anchorIndex < lines.length; anchorIndex++) {
+        let anchor = lines[anchorIndex];
+        let metric = pageMetrics.get(anchor.page);
+        if (
+            !metric ||
+            !isEquationNumberLine(anchor) ||
+            excludedRects.some((rect) => lineCenterInsideRect(anchor, rect))
+        ) {
+            continue;
+        }
+
+        let centerX = anchor.x + anchor.width / 2;
+        let columns = bodyLayout.columns.filter((column) => column.page == anchor.page);
+        let column = columns
+            .filter((candidate) =>
+                centerX >= candidate.x + columnWidth * 0.7 &&
+                centerX <= candidate.x + columnWidth * 1.15
+            )
+            .sort((a, b) =>
+                Math.abs(a.x + columnWidth - centerX) - Math.abs(b.x + columnWidth - centerX)
+            )[0];
+        if (!column) {
+            continue;
+        }
+
+        let columnLeft = column.x - 6;
+        let columnRight = column.x + columnWidth + 12;
+        let nearbyRelations = lines
+            .map((line, index) => ({line, index}))
+            .filter(({line}) =>
+                line.page == anchor.page &&
+                line.y >= anchor.y - bodyFontSize * 0.5 &&
+                line.y <= anchor.y + bodyFontSize * 5 &&
+                line.x + line.width / 2 >= columnLeft &&
+                line.x + line.width / 2 <= columnRight &&
+                isEquationRelationLine(line, columnWidth)
+            )
+            .sort((a, b) => a.line.y - b.line.y);
+
+        // 複数行式は baseline 間隔が本文の約2行分以内で連続する。
+        let relationLines: Array<{line: TextLine; index: number}> = [];
+        let previousY = anchor.y;
+        for (let relation of nearbyRelations) {
+            if (relation.line.y - previousY > bodyFontSize * 2.2) {
+                break;
+            }
+            relationLines.push(relation);
+            previousY = relation.line.y;
+        }
+        if (relationLines.length == 0) {
+            continue;
+        }
+
+        // 分数や総和記号の上下要素を落とさないよう、式本体の上下に本文1行分だけ余裕を持たせる。
+        let minY = Math.min(anchor.y, ...relationLines.map(({line}) => line.y)) - bodyFontSize * 1.15;
+        let maxY = Math.max(anchor.y, ...relationLines.map(({line}) => line.y)) + bodyFontSize * 1.15;
+        let equationLines = lines
+            .map((line, index) => ({line, index}))
+            .filter(({line, index}) =>
+                !usedLineIndices.has(index) &&
+                line.page == anchor.page &&
+                line.y + line.fontSize / 2 >= minY &&
+                line.y + line.fontSize / 2 <= maxY &&
+                line.x + line.width / 2 >= columnLeft &&
+                line.x + line.width / 2 <= columnRight
+            );
+        if (!equationLines.some(({index}) => index == anchorIndex)) {
+            continue;
+        }
+
+        let sourceLines = equationLines.map(({line}) => line);
+        let sourceRect = sourceRectFromLines(sourceLines);
+        if (!sourceRect) {
+            continue;
+        }
+        let rect = expandRect(sourceRect, Math.max(3, bodyFontSize * 0.4), metric);
+        if (excludedRects.some((excluded) => rectsOverlap(rect, excluded))) {
+            continue;
+        }
+
+        let lineIndices = equationLines.map(({index}) => index);
+        lineIndices.forEach((index) => usedLineIndices.add(index));
+        let text = [...sourceLines]
+            .sort((a, b) => b.y - a.y || a.x - b.x)
+            .map((line) => line.text)
+            .join(" ");
+        candidates.push({
+            startIndex: Math.min(...lineIndices),
+            lineIndices,
+            node: new PDF_Node(text, PDF_NodeType.EQUATION, rect, sourceRect)
+        });
+    }
+
+    return candidates;
+}
+
 function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
     if (line.page != rect.page) {
         return false;
@@ -3513,6 +3644,18 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         }
     }
 
+    // 図表領域を除外してから番号付き数式を集め、本文中の壊れた数式断片と置き換える。
+    let equations = collectEquationCandidates(
+        readingLines,
+        bodyFontSize,
+        columnWidth,
+        pageMetrics,
+        bodyLayout,
+        figureRects
+    );
+    let equationByStart = new Map(equations.map((equation) => [equation.startIndex, equation]));
+    let equationLineIndices = new Set(equations.flatMap((equation) => equation.lineIndices));
+
     let nodes: PDF_Node[] = [];
     let title = "";
     let titleLines: TextLine[] = [];
@@ -3552,8 +3695,18 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             continue;
         }
 
+        let equation = equationByStart.get(i);
+        if (equation) {
+            flushTitle();
+            flushParagraph();
+            nodes.push(equation.node);
+            prevTextLine = null;
+            continue;
+        }
+
         if (
             captionLineIndices.has(i) ||
+            equationLineIndices.has(i) ||
             figureRects.some((rect) => lineCenterInsideRect(line, rect))
         ) {
             prevTextLine = null;
@@ -3806,13 +3959,14 @@ export function nodeToHTMLElementName(node: PDF_Node) {
         case PDF_NodeType.CAPTION:
             return "figcaption";
         case PDF_NodeType.FIGURE:
+        case PDF_NodeType.EQUATION:
             return "figure";
         default:
             return "p";
     }
 }
 
-// 切り出し PNG のピクセル数ではなく、PDF 上の bbox 幅を基準に HTML 表示幅を決める。
+// 図表・数式の切り出し PNG は、PDF 上の bbox 幅を基準に HTML 表示幅を決める。
 // 同じ倍率を使いながら上下限を置くことで、細い図の過剰な縮小と大きい図の過剰な拡大を避ける。
 export function figureImageDisplayWidth(rect?: PDF_Rect) {
     if (!rect) {
@@ -3837,6 +3991,14 @@ export function nodesToHTML(nodes: PDF_Node[]) {
                 : "";
             return `<figure${idAttr}>${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption></figure>`;
         }
+        if (node.type == PDF_NodeType.EQUATION) {
+            let imageWidth = figureImageDisplayWidth(node.rect);
+            let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
+            let image = node.imageSrc
+                ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
+                : escapeHTML(node.str);
+            return `<figure class="equation"${idAttr}>${image}</figure>`;
+        }
 
         let tag = nodeToHTMLElementName(node);
         return `<${tag}${idAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`;
@@ -3853,6 +4015,8 @@ export function nodesToHTML(nodes: PDF_Node[]) {
         main a:hover { text-decoration: underline; }
         figure { margin: 1.5rem 0; }
         figure img { display: block; max-width: 100%; height: auto; margin: 0 auto 0.5rem; }
+        figure.equation { margin: 1rem 0; }
+        figure.equation img { margin-bottom: 0; }
         figcaption { font-size: 0.92rem; color: #333; text-align: left; }
     </style>
 </head>
