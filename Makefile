@@ -1,8 +1,10 @@
 PDF ?= work/test.pdf
 OUT ?= work/test.html
 JSON_OUT ?= work/test.json
+WEB_HOST ?= 127.0.0.1
+WEB_PORT ?= 8765
 
-.PHONY: all typecheck extension-build web-build cli-build package cli cli-json init clean distclean
+.PHONY: all typecheck extension-build web-build web-serve cli-build package cli cli-json init clean distclean
 
 # 拡張版はCMapをディレクトリとして同梱し、Web版は単一HTMLへ埋め込む
 all: extension-build web-build cli-build
@@ -20,6 +22,10 @@ extension-build:
 
 web-build:
 	npx webpack --config=webpack.web.config.cjs --mode=production
+
+# Web版をビルドし、File System Access APIを利用できるlocalhostで配信する
+web-serve: web-build
+	python3 -m http.server "$(WEB_PORT)" --bind "$(WEB_HOST)" --directory dist/web
 
 # Web版とChrome拡張を、そのまま配布できる独立したZIPにする
 package: extension-build web-build

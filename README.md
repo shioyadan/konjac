@@ -97,6 +97,9 @@ Konjacは、論文PDFを解析し、読みやすいプレーンなHTMLへ再構�
     - `dist/cli`: CLI
 - **個別のビルド**
     - `make extension-build`、`make web-build`、`make cli-build`を使用します。
+- **Web版のローカル配信**
+    - `make web-serve`を実行し、[http://localhost:8765/](http://localhost:8765/)を開きます。
+    - 待ち受け先を変更する場合は、`WEB_HOST`と`WEB_PORT`を指定します。
 - **配布用ZIPの生成**
 
     ```sh
