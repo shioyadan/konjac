@@ -3949,6 +3949,16 @@ export function linkedNodeHTML(node: PDF_Node, context: HTMLLinkContext) {
     return html + escapeHTML(node.str.slice(offset));
 }
 
+// 連続する中黒付き本文だけを HTML の itemize へ変換するため、表示する項目本文を取り出す。
+export function bulletListItemText(node: PDF_Node) {
+    if (node.type != PDF_NodeType.TEXT) {
+        return null;
+    }
+
+    let match = node.str.match(/^•\s+(.+)$/s);
+    return match?.[1] ?? null;
+}
+
 // 構造ノード種別を HTML タグに対応づける。
 export function nodeToHTMLElementName(node: PDF_Node) {
     switch (node.type) {
@@ -3980,7 +3990,24 @@ export function figureImageDisplayWidth(rect?: PDF_Rect) {
 // CLI 出力用の最小 HTML を生成する。
 export function nodesToHTML(nodes: PDF_Node[]) {
     let linkContext = buildHTMLLinkContext(nodes);
-    let body = nodes.map((node) => {
+    let body: string[] = [];
+
+    for (let index = 0; index < nodes.length; index++) {
+        let node = nodes[index];
+        let listEnd = index;
+        while (listEnd < nodes.length && bulletListItemText(nodes[listEnd]) != null) {
+            listEnd++;
+        }
+        if (listEnd - index >= 2) {
+            let items = nodes.slice(index, listEnd).map((item) => {
+                let text = bulletListItemText(item) ?? item.str;
+                return `<li>${linkedNodeHTML({...item, str: text}, linkContext)}</li>`;
+            }).join("\n");
+            body.push(`<ul>\n${items}\n</ul>`);
+            index = listEnd - 1;
+            continue;
+        }
+
         let id = nodeHTMLId(node, linkContext);
         let idAttr = id ? ` id="${escapeHTML(id)}"` : "";
         if (node.type == PDF_NodeType.FIGURE) {
@@ -3989,7 +4016,8 @@ export function nodesToHTML(nodes: PDF_Node[]) {
             let image = node.imageSrc
                 ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
                 : "";
-            return `<figure${idAttr}>${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption></figure>`;
+            body.push(`<figure${idAttr}>${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption></figure>`);
+            continue;
         }
         if (node.type == PDF_NodeType.EQUATION) {
             let imageWidth = figureImageDisplayWidth(node.rect);
@@ -3997,12 +4025,13 @@ export function nodesToHTML(nodes: PDF_Node[]) {
             let image = node.imageSrc
                 ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
                 : escapeHTML(node.str);
-            return `<figure class="equation"${idAttr}>${image}</figure>`;
+            body.push(`<figure class="equation"${idAttr}>${image}</figure>`);
+            continue;
         }
 
         let tag = nodeToHTMLElementName(node);
-        return `<${tag}${idAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`;
-    }).join("\n");
+        body.push(`<${tag}${idAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`);
+    }
 
     return `<!DOCTYPE html>
 <html>
@@ -4013,6 +4042,8 @@ export function nodesToHTML(nodes: PDF_Node[]) {
         main { max-width: 760px; margin: 0 auto; line-height: 1.55; }
         main a { color: #0645ad; text-decoration: none; }
         main a:hover { text-decoration: underline; }
+        main > ul { margin: 0.4rem 1.25rem 0.9rem; padding-left: 1.1rem; }
+        main > ul > li + li { margin-top: 0.2rem; }
         figure { margin: 1.5rem 0; }
         figure img { display: block; max-width: 100%; height: auto; margin: 0 auto 0.5rem; }
         figure.equation { margin: 1rem 0; }
@@ -4022,7 +4053,7 @@ export function nodesToHTML(nodes: PDF_Node[]) {
 </head>
 <body>
 <main>
-${body}
+${body.join("\n")}
 </main>
 </body>
 </html>`;

@@ -7,6 +7,7 @@ import {
     PDF_PageInput,
     PDF_Rect,
     buildHTMLLinkContext,
+    bulletListItemText,
     extractNodesFromPages,
     extractPageInputFromPDFPage,
     figureImageDisplayWidth,
@@ -193,7 +194,26 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
     main.replaceChildren();
     let linkContext = buildHTMLLinkContext(nodes);
 
-    for (let node of nodes) {
+    for (let index = 0; index < nodes.length; index++) {
+        let node = nodes[index];
+        let listEnd = index;
+        while (listEnd < nodes.length && bulletListItemText(nodes[listEnd]) != null) {
+            listEnd++;
+        }
+        if (listEnd - index >= 2) {
+            let list = document.createElement("ul");
+            for (let item of nodes.slice(index, listEnd)) {
+                let li = document.createElement("li");
+                li.innerHTML = linkedNodeHTML({...item, str: bulletListItemText(item) ?? item.str}, linkContext);
+                rememberPDFSource(li, item, pageProxies);
+                attachPDFSourceToggle(li);
+                list.appendChild(li);
+            }
+            main.appendChild(list);
+            index = listEnd - 1;
+            continue;
+        }
+
         let id = nodeHTMLId(node, linkContext);
         if (node.type == PDF_NodeType.FIGURE) {
             let figure = document.createElement("figure");
@@ -325,7 +345,7 @@ function enableHTMLExport(pdfURL: string) {
 
 function translatableElements() {
     return Array.from(document.querySelectorAll<HTMLElement>(
-        "#main > p, #main > h1, #main > h2, #main > h3, #main > h4, #main > h5, #main > h6, #main > figcaption, #main > figure > figcaption"
+        "#main > p, #main > h1, #main > h2, #main > h3, #main > h4, #main > h5, #main > h6, #main > ul > li, #main > figcaption, #main > figure > figcaption"
     )).filter((element) => translatableText(element) != "");
 }
 
@@ -625,7 +645,7 @@ function combinedPDFSource(sources: PDFSourceLocation[]) {
 
 function selectedSourceBlocks(elements: HTMLElement[]) {
     return [...new Set(elements.map((element) =>
-        element.closest<HTMLElement>("#main > *") ?? element
+        element.closest<HTMLElement>("#main > ul > li, #main > *") ?? element
     ))];
 }
 
@@ -816,7 +836,7 @@ function updatePDFSelection() {
 
     let range = selection.getRangeAt(0);
     let elements = Array.from(main.querySelectorAll<HTMLElement>(
-        ":scope > .source-linked, :scope > figure > figcaption.source-linked"
+        ":scope > .source-linked, :scope > ul > li.source-linked, :scope > figure > figcaption.source-linked"
     ));
     let selected = elements.filter((element) => {
         try {
