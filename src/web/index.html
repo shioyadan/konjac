@@ -31,6 +31,12 @@
         #document-controls[hidden], #translation-controls[hidden] { display: none; }
         .text-button { padding: 0; border: 0; background: none; color: #0d6efd; font: inherit; }
         .text-button:hover, .text-button:focus { text-decoration: underline; }
+        .recent-files { margin-top: 0.75rem; }
+        .recent-files summary { width: fit-content; color: #495057; cursor: pointer; }
+        .recent-file-list { margin: 0.35rem 0 0; padding-left: 1.4rem; }
+        .recent-file-list li { margin: 0.15rem 0; }
+        .recent-file-list .text-button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+        .recent-file-list time { margin-left: 0.6rem; color: #6c757d; font-size: 0.75rem; }
         .paragraph-toggle { margin-left: 0.4rem; font-size: 0.72rem; opacity: 0; }
         .source-linked:hover > .paragraph-toggle, .translatable:hover > .paragraph-toggle, .paragraph-toggle:focus { opacity: 1; }
         .translation-alternative { display: block; margin-top: 0.35rem; }
@@ -93,6 +99,10 @@
                         <input id="pdf-file" type="file" accept="application/pdf,.pdf" hidden>
                     </label>
                     <small id="web-status" aria-live="polite"></small>
+                    <details id="recent-files" class="recent-files" hidden>
+                        <summary>Recent files</summary>
+                        <ul id="recent-file-list" class="recent-file-list"></ul>
+                    </details>
                 </div>
                 <div id="document-controls" data-export-exclude hidden>
                     <span id="translation-controls" hidden>
