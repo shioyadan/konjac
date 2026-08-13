@@ -788,6 +788,10 @@ function isReferencesHeading(text: string) {
     return /^(?:REFERENCES|References)$/.test(text);
 }
 
+function isAcknowledgementsHeading(text: string) {
+    return /^(?:ACKNOWLEDGEMENTS?|Acknowledgements?)$/.test(text);
+}
+
 function arabicSectionNumbers(text: string) {
     let match = text.match(/^(\d+(?:\.\d+)*\.?)\s+([A-Z][A-Za-z0-9 .&()/\-]+)$/);
     if (!match) {
@@ -828,17 +832,18 @@ function isHeadingText(text: string) {
     return (
         isAbstractHeading(text) ||
         isReferencesHeading(text) ||
+        isAcknowledgementsHeading(text) ||
         isNumberedSectionHeading(text)
     );
 }
 
 // フォントサイズと文字列パターンから見出し行を判定する。
-function isHeadingLine(line: TextLine, bodyFontSize: number) {
+function isHeadingLine(line: TextLine, bodyFontSize: number, relaxed = false) {
     if (isTitleLine(line, bodyFontSize)) {
         return false;
     }
 
-    if (isAbstractHeading(line.text) || isReferencesHeading(line.text)) {
+    if (isAbstractHeading(line.text) || isReferencesHeading(line.text) || isAcknowledgementsHeading(line.text)) {
         return true;
     }
 
@@ -852,7 +857,7 @@ function isHeadingLine(line: TextLine, bodyFontSize: number) {
     }
 
     if (isRomanSectionHeading(line.text) || isLetteredSectionHeading(line.text)) {
-        return line.fontSize >= bodyFontSize - 0.5 && line.text.length < 140;
+        return line.fontSize >= bodyFontSize - (relaxed ? 3.0 : 0.5) && line.text.length < 140;
     }
 
     return (
@@ -892,6 +897,17 @@ function looksLikeHeadingContinuation(headText: string, text: string) {
         headEndsWithFragment && /^-/.test(firstWord) ||
         /^and\s+[A-Z0-9]/.test(text.trim())
     );
+}
+
+// OCRが同じ見出しを横方向に分割した場合、同一baseline上の短い続きとして結合する。
+function isSameLineHeadingContinuation(line: TextLine, nextLine: TextLine, bodyFontSize: number) {
+    let gap = nextLine.x - (line.x + line.width);
+    return nextLine.page == line.page &&
+        Math.abs(nextLine.y - line.y) <= LINE_Y_EPSILON &&
+        gap >= -2 && gap <= Math.max(18, bodyFontSize * 2) &&
+        Math.abs(nextLine.fontSize - line.fontSize) <= 1.2 &&
+        nextLine.text.length <= 50 &&
+        /^[A-Z][A-Za-z0-9 &()/\-]+$/.test(nextLine.text);
 }
 
 // 見出しと本文が同じ PDF 行に載っている場合に分割する。
@@ -1175,16 +1191,28 @@ function sortLinesForReading(lines: TextLine[]) {
 }
 
 // 行間、インデント、カラム遷移から段落の切れ目を推定する。
-function shouldStartParagraph(line: TextLine, prevLine: TextLine | null, columnWidth: number, paragraph: string) {
+function shouldStartParagraph(
+    line: TextLine,
+    prevLine: TextLine | null,
+    columnWidth: number,
+    paragraph: string,
+    inReferencesSection: boolean
+) {
     if (!prevLine) {
         return false;
     }
 
-    if (isReferenceEntryStart(paragraph) && !isReferenceEntryStart(line.text)) {
+    if (
+        isLikelyStandaloneReferenceEntryStart(paragraph, inReferencesSection) &&
+        !isReferenceEntryStart(line.text)
+    ) {
         return false;
     }
 
-    if (paragraph != "" && isReferenceEntryStart(line.text)) {
+    if (
+        paragraph != "" &&
+        isLikelyStandaloneReferenceEntryStart(line.text, inReferencesSection)
+    ) {
         return true;
     }
 
@@ -1206,7 +1234,11 @@ function shouldStartParagraph(line: TextLine, prevLine: TextLine | null, columnW
     }
 
     if (line.page != prevLine.page) {
-        return false;
+        // ページをまたぐ場合は、行末と次行から継続が明確なときだけ同じ段落にする。
+        return !(
+            prevLine.text.endsWith("-") ||
+            !paragraphEndsWithSentenceStop(paragraph) && startsLikeParagraphContinuation(line.text)
+        );
     }
 
     let sameColumn = Math.abs(line.x - prevLine.x) < columnWidth * 0.5;
@@ -1259,6 +1291,16 @@ function isListItemStart(text: string) {
 
 function isReferenceEntryStart(text: string) {
     return /^(?:\[\d+\]|\d+\.)\s+/.test(text.trim());
+}
+
+// REFERENCES 見出しを抽出できない文書でも文献を分離するが、本文冒頭の [21] selectively... のような継続は除く。
+function isLikelyStandaloneReferenceEntryStart(text: string, inReferencesSection: boolean) {
+    if (!isReferenceEntryStart(text)) {
+        return false;
+    }
+
+    let remainder = text.trim().replace(/^(?:\[\d+\]|\d+\.)\s+/, "");
+    return inReferencesSection || !/^[a-z]/.test(remainder);
 }
 
 // 図中の目盛りやベンチマーク名の列は数字・記号・短い識別子から始まりやすい。
@@ -1464,6 +1506,7 @@ function moveInterruptedFiguresAfterParagraphs(nodes: PDF_Node[]) {
                 figures.length == 0 ||
                 !nextText ||
                 nextText.type != PDF_NodeType.TEXT ||
+                (node.sourceRect?.page != nextText.sourceRect?.page && !text.trim().endsWith("-")) ||
                 !looksLikeInterruptedParagraph(text, nextText.str)
             ) {
                 break;
@@ -1492,7 +1535,7 @@ function moveInterruptedFiguresAfterParagraphs(nodes: PDF_Node[]) {
 }
 
 // 図をまたがない場合でも、数式断片などで隣接 TEXT に割れた本文は最後にまとめ直す。
-function mergeAdjacentTextFragments(nodes: PDF_Node[]) {
+function mergeAdjacentTextFragments(nodes: PDF_Node[], columnWidth: number) {
     let result: PDF_Node[] = [];
 
     for (let node of nodes) {
@@ -1500,6 +1543,12 @@ function mergeAdjacentTextFragments(nodes: PDF_Node[]) {
         if (
             prev?.type == PDF_NodeType.TEXT &&
             node.type == PDF_NodeType.TEXT &&
+            prev.sourceRect?.page == node.sourceRect?.page &&
+            !(
+                !prev.str.trim().endsWith("-") &&
+                prev.str.length < 40 &&
+                (prev.sourceRect?.width ?? columnWidth) < columnWidth * 0.5
+            ) &&
             looksLikeInterruptedParagraph(prev.str, node.str)
         ) {
             prev.str = appendLineText(prev.str, node.str);
@@ -1767,12 +1816,12 @@ function isPullQuoteLine(line: TextLine, bodyFontSize: number) {
 }
 
 // 本文フォントより小さい行と記号だけの行は、図表ラベルや数式部品として扱う。
-function shouldDropStructuralFragmentLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
+function shouldDropStructuralFragmentLine(line: TextLine, bodyFontSize: number, columnWidth: number, relaxedHeading = false) {
     if (isPullQuoteLine(line, bodyFontSize)) {
         return true;
     }
 
-    if (isCaptionLine(line) || isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize)) {
+    if (isCaptionLine(line) || isHeadingLine(line, bodyFontSize, relaxedHeading) || isTitleLine(line, bodyFontSize)) {
         return false;
     }
 
@@ -1830,6 +1879,16 @@ function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
     }
 
     return rectArea(graphic) >= 6 || Math.max(graphic.width, graphic.height) >= 10;
+}
+
+// ページ全面が1枚の画像で、その上にOCRテキストだけが重なっているPDFかを判定する。
+function hasFullPageImage(graphics: PDF_GraphicObject[], metric: PageMetrics) {
+    return graphics.some((graphic) =>
+        graphic.page == metric.page &&
+        graphic.kind == "image" &&
+        graphic.width >= metric.width * 0.9 &&
+        graphic.height >= metric.height * 0.9
+    );
 }
 
 // bitmap scan が実際の境界を決めるため、ここでは caption の上下関係だけでページ内の安全上限を作る。
@@ -2889,6 +2948,100 @@ function fitTableRectByBitmap(
     return finalRect;
 }
 
+// OCR付き全面画像では図形の描画命令を得られないため、本文・見出しとの境界から図表領域を補う。
+function estimateRasterFigureRect(
+    captionLines: TextLine[],
+    tableCaption: boolean,
+    lines: TextLine[],
+    bodyFontSize: number,
+    columnWidth: number,
+    metric: PageMetrics,
+    bodyLayout: BodyLayoutModel,
+    log?: DebugScanLog
+) {
+    let captionLine = captionLines[0];
+    let captionEndLine = captionLines[captionLines.length - 1] ?? captionLine;
+    let centerX = captionLine.x + captionLine.width / 2;
+    let wideTable = tableCaption && Math.abs(centerX - metric.width / 2) < columnWidth * 0.18;
+    let pageColumns = bodyLayout.columns
+        .filter((column) => column.page == captionLine.page)
+        .sort((a, b) => a.x - b.x);
+    let owner: PDF_Rect;
+
+    if (wideTable) {
+        let x = Math.max(36, metric.minX - 6);
+        let right = Math.min(metric.width - 36, metric.maxX + 6);
+        owner = {page: captionLine.page, x, y: 0, width: right - x, height: metric.height};
+    }
+    else {
+        let rightColumn = centerX >= metric.width / 2;
+        let column = rightColumn ? pageColumns[pageColumns.length - 1] : pageColumns[0];
+        let anchor = captionSearchAnchorRect(captionLine, columnWidth, metric);
+        let x = column ? Math.max(36, column.x - 6) : anchor?.x ?? Math.max(36, captionLine.x - 6);
+        let width = Math.min(metric.width - 36 - x, Math.max(columnWidth + 12, anchor?.width ?? 0));
+        owner = {page: captionLine.page, x, y: 0, width, height: metric.height};
+    }
+
+    let blockers = lines.filter((line) =>
+        line.page == captionLine.page &&
+        !captionLines.includes(line) &&
+        lineCenterHorizontallyInsideRect(line, owner, Math.max(4, bodyFontSize * 0.5)) &&
+        (
+            isHeadingLine(line, bodyFontSize, true) ||
+            isCaptionLine(line, bodyFontSize, columnWidth) ||
+            isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) &&
+                isBodySizedProseFragment(line, bodyFontSize)
+        )
+    );
+    let padding = Math.max(6, bodyFontSize * 0.7);
+
+    if (tableCaption) {
+        let top = lineRect(captionEndLine).y - padding * 0.5;
+        let nextBlocker = blockers
+            .filter((line) => line.y < captionEndLine.y)
+            .sort((a, b) => b.y - a.y)[0];
+        let y = nextBlocker
+            ? rectTop(lineRect(nextBlocker)) + padding
+            : 36;
+        if (top - y < Math.max(36, bodyFontSize * 4)) {
+            return null;
+        }
+        let rect = {...owner, y, height: top - y};
+        rect = trimTableRectAtTextGap(rect, captionLines, lines, bodyFontSize, log);
+        let footnote = lines
+            .filter((line) =>
+                line.page == rect.page &&
+                line.y < captionEndLine.y &&
+                line.fontSize < bodyFontSize - 1 &&
+                /^[*†‡]/.test(line.text.trim()) &&
+                lineCenterHorizontallyInsideRect(line, rect, 0)
+            )
+            .sort((a, b) => b.y - a.y)[0];
+        if (footnote) {
+            let trimmedY = Math.min(rectTop(rect) - 36, rectTop(lineRect(footnote)) + padding);
+            if (trimmedY > rect.y) {
+                rect = {...rect, y: trimmedY, height: rectTop(rect) - trimmedY};
+            }
+        }
+        log?.(`raster table fallback: ${fmtRect(rect)}`);
+        return rect;
+    }
+
+    let y = figureCaptionClearY(captionLine);
+    let previousBlocker = blockers
+        .filter((line) => line.y > captionLine.y)
+        .sort((a, b) => a.y - b.y)[0];
+    let top = previousBlocker
+        ? lineRect(previousBlocker).y - padding
+        : metric.height - 36;
+    if (top - y < Math.max(36, bodyFontSize * 4)) {
+        return null;
+    }
+    let rect = {...owner, y, height: top - y};
+    log?.(`raster figure fallback: ${fmtRect(rect)}`);
+    return rect;
+}
+
 // Figure はキャプション側から bitmap を走査し、水平・垂直の空白帯を図の外側境界として切る。
 // 本文・見出し・別キャプションに当たった場合は、その手前の安全な範囲へ戻す。
 function fitRectByCaptionSearch(
@@ -3251,15 +3404,29 @@ function collectFigureCandidates(
             }
         }
 
+        let collectedCaptionLines = lines.slice(i, endIndex + 1);
+        if (hasFullPageImage(graphics, metric)) {
+            rect = estimateRasterFigureRect(
+                collectedCaptionLines,
+                tableCaption,
+                lines,
+                bodyFontSize,
+                columnWidth,
+                metric,
+                bodyLayout,
+                scanLog
+            ) ?? rect;
+        }
+
         candidates.push({
             startIndex: i,
             endIndex,
-            captionLines: lines.slice(i, endIndex + 1),
+            captionLines: collectedCaptionLines,
             node: new PDF_Node(
                 caption,
                 PDF_NodeType.FIGURE,
                 rect ?? undefined,
-                sourceRectFromLines(lines.slice(i, endIndex + 1))
+                sourceRectFromLines(collectedCaptionLines)
             )
         });
     }
@@ -3309,6 +3476,11 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
 
     // 図表を画像として切り出すため、PDF ページ寸法と本文領域を用意する。
     let pageMetrics = estimatePageMetrics(lines, pages);
+    let rasterPages = new Set(
+        [...pageMetrics.values()]
+            .filter((metric) => hasFullPageImage(graphics, metric))
+            .map((metric) => metric.page)
+    );
     let pageColumnWidth = median(
         [...pageMetrics.values()]
             .map((metric) => (metric.maxX - metric.minX) / 2 - 8)
@@ -3370,6 +3542,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     // キャプション行と図表矩形内の行を飛ばしながら、残りを構造ノードへ変換する。
     for (let i = 0; i < readingLines.length; i++) {
         let line = readingLines[i];
+        let relaxedHeading = rasterPages.has(line.page);
         let figure = figureByStart.get(i);
         if (figure) {
             flushTitle();
@@ -3387,7 +3560,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             continue;
         }
 
-        if (!inReferencesSection && shouldDropStructuralFragmentLine(line, bodyFontSize, columnWidth)) {
+        if (!inReferencesSection && shouldDropStructuralFragmentLine(line, bodyFontSize, columnWidth, relaxedHeading)) {
             let prevLine = i > 0 ? readingLines[i - 1] : null;
             let nextLine = readingLines[i + 1];
             if (
@@ -3406,16 +3579,30 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             prevTextLine = null;
             inReferencesSection = false;
         }
-        else if (isHeadingLine(line, bodyFontSize)) {
+        else if (isHeadingLine(line, bodyFontSize, relaxedHeading)) {
             flushTitle();
             flushParagraph();
-            nodes.push(new PDF_Node(line.text, PDF_NodeType.HEADING, undefined, sourceRectFromLines([line])));
+            let headingLines = [line];
+            let heading = line.text;
+            let nextLine = readingLines[i + 1];
+            if (
+                relaxedHeading &&
+                nextLine &&
+                !figureByStart.has(i + 1) &&
+                !captionLineIndices.has(i + 1) &&
+                isSameLineHeadingContinuation(line, nextLine, bodyFontSize)
+            ) {
+                heading = appendLineText(heading, nextLine.text);
+                headingLines.push(nextLine);
+                i++;
+            }
+            nodes.push(new PDF_Node(heading, PDF_NodeType.HEADING, undefined, sourceRectFromLines(headingLines)));
             prevTextLine = null;
-            inReferencesSection = isReferencesHeading(line.text);
+            inReferencesSection = isReferencesHeading(heading);
         }
         else {
             flushTitle();
-            if (shouldStartParagraph(line, prevTextLine, columnWidth, paragraph)) {
+            if (shouldStartParagraph(line, prevTextLine, columnWidth, paragraph, inReferencesSection)) {
                 flushParagraph();
             }
             paragraph = appendLineText(paragraph, line.text);
@@ -3426,7 +3613,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
 
     flushTitle();
     flushParagraph();
-    return mergeAdjacentTextFragments(moveInterruptedFiguresAfterParagraphs(nodes));
+    return mergeAdjacentTextFragments(moveInterruptedFiguresAfterParagraphs(nodes), columnWidth);
 }
 
 // 旧 API 互換: 1 ページ分の TextItem だけから抽出する。
