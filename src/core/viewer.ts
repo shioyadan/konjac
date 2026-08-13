@@ -265,6 +265,12 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
         }
 
         let div = document.createElement(nodeToHTMLElementName(node));
+        if (node.type == PDF_NodeType.AUTHOR) {
+            div.className = "authors";
+        }
+        else if (node.type == PDF_NodeType.AFFILIATION) {
+            div.className = "affiliations";
+        }
         if (id) {
             div.id = id;
         }

@@ -23,7 +23,11 @@ export enum PDF_NodeType {
     // Figure/Table を PDF ページから切り出して表示するためのノード。
     FIGURE = 5,
     // 番号付き数式を PDF ページから切り出して表示するためのノード。
-    EQUATION = 6
+    EQUATION = 6,
+    // 論文タイトル直下から抽出した著者名。
+    AUTHOR = 7,
+    // 著者名直下の所属・所在地・連絡先。
+    AFFILIATION = 8
 };
 
 // PDF ページ上の矩形。PDF.js の page.render で切り出すため、座標系は PDF と同じ左下原点。
@@ -64,7 +68,7 @@ export interface PDF_PageInput {
 export class PDF_Node {
     // ノード内のプレーンテキスト。
     str: string;
-    // 本文、タイトル、見出し、キャプション、図表、数式の種別。
+    // 本文、タイトル、著者・所属、見出し、キャプション、図表、数式の種別。
     type: PDF_NodeType;
     // 図表・数式ノードの場合、PDF ページから切り出す矩形。
     rect?: PDF_Rect;
@@ -188,6 +192,14 @@ interface EquationCandidate {
     lineIndices: number[];
     // PDF ページから切り出して表示する数式ノード。
     node: PDF_Node;
+}
+
+// 1ページ目から本文抽出より先に確定するタイトル・著者と、除外する誌面ヘッダー。
+interface DocumentMetadata {
+    titleLines: TextLine[];
+    authorLines: TextLine[];
+    affiliationLines: TextLine[];
+    ignoredLines: Set<TextLine>;
 }
 
 // CLI などで内部の空間分類を確認するためのデバッグ出力。
@@ -790,6 +802,223 @@ function isAlgorithmCaptionLine(line: TextLine) {
 // 1 ページ目で本文より十分大きい行を論文タイトル候補とする。
 function isTitleLine(line: TextLine, bodyFontSize: number) {
     return line.page == 1 && lineDominantFontSize(line) >= bodyFontSize + 5;
+}
+
+// 所属・所在地・連絡先に典型的な語を検出し、著者名と区別する。
+function looksLikeAffiliationText(text: string) {
+    return (
+        /(?:\b(?:University|Institute|Institution|Corporation|Laborator(?:y|ies)|Research\s+Center|Centre|School|College|Department|Faculty|Engineering|Email)\b|\bDept\.)/i.test(text) ||
+        /^(?:AMD|IBM|Intel|RIKEN|MIT)\b/.test(text.trim()) ||
+        /@|https?:|[{}]|\b(?:USA|Japan|Belgium|Germany)\b|,\s*[A-Z]{2}(?:\s|,|$)|\b\d{4,}\b/.test(text)
+    );
+}
+
+// 氏名に付く脚注記号を落とし、複数行から一つの著者列を作れる形へ正規化する。
+function cleanAuthorText(text: string) {
+    return text
+        .replace(/[•*†‡∗]+/g, "")
+        .replace(/\s+,/g, ",")
+        .replace(/,\s*$/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+// 大文字で始まる人名語が複数ある短い行を著者名候補とする。
+function looksLikeAuthorText(text: string) {
+    let cleaned = cleanAuthorText(text);
+    if (cleaned.length < 5 || cleaned.length > 260 || looksLikeAffiliationText(cleaned)) {
+        return false;
+    }
+
+    let tokens = cleaned.split(/[\s,]+/).filter((token) => token != "");
+    let nameTokens = tokens.filter((token) =>
+        /^(?:[A-Z][A-Za-z'’\-]+|[A-Z]\.|Jr\.?|Sr\.?)$/.test(token)
+    ).length;
+    let allowedTokens = nameTokens + tokens.filter((token) => /^(?:and|&|van|von|de|da|del)$/i.test(token)).length;
+    return nameTokens >= 2 && allowedTokens >= Math.max(2, tokens.length * 0.55);
+}
+
+// 著者名と所属が同一baselineへ結合された場合、TextPart境界で二つの行へ戻す。
+function splitMixedAuthorAffiliationLines(lines: TextLine[]) {
+    let result: TextLine[] = [];
+
+    for (let line of lines) {
+        if (line.page != 1 || line.parts.length < 2) {
+            result.push(line);
+            continue;
+        }
+
+        let splitAt = line.parts.findIndex((part, index) =>
+            index > 0 && looksLikeAffiliationText(part.text)
+        );
+        if (splitAt < 1) {
+            result.push(line);
+            continue;
+        }
+
+        let author = partsToLine(line.parts.slice(0, splitAt));
+        let affiliation = partsToLine(line.parts.slice(splitAt));
+        if (!author || !affiliation || !looksLikeAuthorText(author.text)) {
+            result.push(line);
+            continue;
+        }
+
+        result.push(author, affiliation);
+    }
+
+    return result;
+}
+
+// 近いbaselineと同じ大きなフォントを持つ行を、一つのタイトル候補群へまとめる。
+function titleLineGroups(lines: TextLine[], bodyFontSize: number, metric: PageMetrics) {
+    let candidates = lines
+        .filter((line) =>
+            line.page == 1 &&
+            line.y > metric.height * 0.35 &&
+            lineDominantFontSize(line) >= bodyFontSize + 1.5 &&
+            !/^\d+(?:\.\d+)*$/.test(line.text.trim()) &&
+            !isAbstractHeading(line.text) &&
+            !isCaptionLine(line, bodyFontSize, metric.width / 2)
+        )
+        .sort((a, b) => b.y - a.y || a.x - b.x);
+    let groups: TextLine[][] = [];
+
+    for (let line of candidates) {
+        let group = groups[groups.length - 1];
+        let previous = group?.[group.length - 1];
+        let groupFontSize = group ? median(group.map(lineDominantFontSize), lineDominantFontSize(line)) : 0;
+        if (
+            !group ||
+            !previous ||
+            previous.y - line.y > Math.max(18, groupFontSize * 1.6) ||
+            Math.abs(lineDominantFontSize(line) - groupFontSize) > 1.5
+        ) {
+            groups.push([line]);
+        }
+        else {
+            group.push(line);
+        }
+    }
+
+    return groups;
+}
+
+// ページ上部で最大のフォント群をタイトルとし、その直下の人名行を著者として抽出する。
+function collectDocumentMetadata(
+    lines: TextLine[],
+    bodyFontSize: number,
+    metric: PageMetrics | undefined
+): DocumentMetadata {
+    let empty = {titleLines: [], authorLines: [], affiliationLines: [], ignoredLines: new Set<TextLine>()};
+    if (!metric) {
+        return empty;
+    }
+
+    let pageLines = lines.filter((line) => line.page == 1);
+    let groups = titleLineGroups(pageLines, bodyFontSize, metric);
+    if (groups.length == 0) {
+        return empty;
+    }
+
+    let rankedTitleGroups = groups
+        .sort((a, b) => {
+            let fontDelta = median(b.map(lineDominantFontSize), 0) - median(a.map(lineDominantFontSize), 0);
+            return fontDelta || b.reduce((sum, line) => sum + line.width, 0) - a.reduce((sum, line) => sum + line.width, 0);
+        });
+    let titleFontSize = median(rankedTitleGroups[0].map(lineDominantFontSize), 0);
+    let tiedTitleGroups = rankedTitleGroups
+        .filter((group) => Math.abs(median(group.map(lineDominantFontSize), 0) - titleFontSize) <= 0.5);
+    // 同じ最大フォントの離れた行は同じタイトルとして扱い、最大が最上端のヘッダーだけなら次候補へ移る。
+    let selectedTitleGroups = tiedTitleGroups;
+    if (
+        tiedTitleGroups.length == 1 &&
+        metric.height - Math.max(...tiedTitleGroups[0].map((line) => line.y)) < bodyFontSize * 1.2
+    ) {
+        let lowerGroup = rankedTitleGroups.find((group) =>
+            group != tiedTitleGroups[0] &&
+            Math.max(...group.map((line) => line.y)) < Math.min(...tiedTitleGroups[0].map((line) => line.y)) &&
+            titleFontSize - median(group.map(lineDominantFontSize), 0) <= 2.5
+        );
+        if (lowerGroup) {
+            selectedTitleGroups = [lowerGroup];
+        }
+    }
+    let titleLines = selectedTitleGroups
+        .flat()
+        .sort((a, b) => b.y - a.y || a.x - b.x);
+    let titleBottom = Math.min(...titleLines.map((line) => line.y));
+    let authorLines: TextLine[] = [];
+    let authorStarted = false;
+    let authorEnded = false;
+    let authorRange = Math.max(130, bodyFontSize * 14);
+    let possibleAuthors = pageLines
+        .filter((line) => line.y < titleBottom - bodyFontSize * 0.4 && line.y > titleBottom - authorRange)
+        .sort((a, b) => b.y - a.y || a.x - b.x);
+
+    for (let line of possibleAuthors) {
+        if (/^[\s\d•*†‡∗]+$/.test(line.text)) {
+            continue;
+        }
+        if (looksLikeAuthorText(line.text)) {
+            if (!authorEnded) {
+                authorLines.push(line);
+                authorStarted = true;
+            }
+            continue;
+        }
+        if (authorStarted && looksLikeAffiliationText(line.text)) {
+            authorEnded = true;
+        }
+    }
+
+    let affiliationLines: TextLine[] = [];
+    if (authorLines.length > 0) {
+        let authorTop = Math.max(...authorLines.map((line) => line.y));
+        let authorBottom = Math.min(...authorLines.map((line) => line.y));
+        let abstractLine = pageLines
+            .filter((line) => isAbstractHeading(line.text) && line.y < authorBottom)
+            .sort((a, b) => b.y - a.y)[0];
+        let affiliationFloor = abstractLine
+            ? abstractLine.y + bodyFontSize * 0.5
+            : authorBottom - bodyFontSize * 5.5;
+        affiliationLines = pageLines
+            .filter((line) =>
+                !authorLines.includes(line) &&
+                line.y <= authorTop + LINE_Y_EPSILON &&
+                line.y > affiliationFloor &&
+                looksLikeAffiliationText(line.text)
+            )
+            .sort((a, b) => b.y - a.y || a.x - b.x);
+    }
+
+    let ignoredLines = new Set<TextLine>([...titleLines, ...authorLines, ...affiliationLines]);
+    let titleTop = Math.max(...titleLines.map((line) => line.y));
+    for (let line of pageLines) {
+        if (
+            line.y > titleTop + bodyFontSize * 1.5 ||
+            line.y >= titleBottom - bodyFontSize * 0.5 &&
+                line.y <= titleTop + bodyFontSize * 0.5 &&
+                /^\d+(?:\.\d+)*$/.test(line.text.trim())
+        ) {
+            ignoredLines.add(line);
+        }
+    }
+
+    return {titleLines, authorLines, affiliationLines, ignoredLines};
+}
+
+// 複数行・複数列の著者名を、誌面上の順序を保つ一つの文字列へまとめる。
+function authorTextFromLines(lines: TextLine[]) {
+    return lines
+        .sort((a, b) => Math.abs(a.y - b.y) <= LINE_Y_EPSILON ? a.x - b.x : b.y - a.y)
+        .map((line) => cleanAuthorText(line.text))
+        .filter((text) => text != "")
+        .join(", ");
+}
+
+// 所属・所在地・連絡先は著者の直後に一つのメタデータ段落としてまとめる。
+function affiliationTextFromLines(lines: TextLine[]) {
+    return lines.reduce((text, line) => appendLineText(text, line.text), "");
 }
 
 function isAbstractHeading(text: string) {
@@ -3649,6 +3878,8 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         .filter((line) => line.text != "")
         .filter((line) => !isPageDecoration(line));
     lines = normalizeDropCaps(lines, bodyFontSize);
+    lines = splitMixedAuthorAffiliationLines(lines);
+    let metadata = collectDocumentMetadata(lines, bodyFontSize, pageMetrics.get(1));
 
     // 読み順にした行から Figure/Table を先に集め、後続の本文抽出で除外できる形にする。
     let bodyLayout = estimateBodyLayout(lines, bodyFontSize, columnWidth);
@@ -3681,6 +3912,33 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let equationLineIndices = new Set(equations.flatMap((equation) => equation.lineIndices));
 
     let nodes: PDF_Node[] = [];
+    if (metadata.titleLines.length > 0) {
+        let metadataTitle = metadata.titleLines.reduce((text, line) => appendLineText(text, line.text), "");
+        nodes.push(new PDF_Node(
+            metadataTitle,
+            PDF_NodeType.TITLE,
+            undefined,
+            sourceRectFromLines(metadata.titleLines)
+        ));
+    }
+    let metadataAuthors = authorTextFromLines(metadata.authorLines);
+    if (metadataAuthors != "") {
+        nodes.push(new PDF_Node(
+            metadataAuthors,
+            PDF_NodeType.AUTHOR,
+            undefined,
+            sourceRectFromLines(metadata.authorLines)
+        ));
+    }
+    let metadataAffiliations = affiliationTextFromLines(metadata.affiliationLines);
+    if (metadataAffiliations != "") {
+        nodes.push(new PDF_Node(
+            metadataAffiliations,
+            PDF_NodeType.AFFILIATION,
+            undefined,
+            sourceRectFromLines(metadata.affiliationLines)
+        ));
+    }
     let title = "";
     let titleLines: TextLine[] = [];
     let paragraph = "";
@@ -3724,6 +3982,11 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             flushTitle();
             flushParagraph();
             nodes.push(equation.node);
+            prevTextLine = null;
+            continue;
+        }
+
+        if (metadata.ignoredLines.has(line)) {
             prevTextLine = null;
             continue;
         }
@@ -3988,6 +4251,9 @@ export function nodeToHTMLElementName(node: PDF_Node) {
     switch (node.type) {
         case PDF_NodeType.TITLE:
             return "h1";
+        case PDF_NodeType.AUTHOR:
+        case PDF_NodeType.AFFILIATION:
+            return "p";
         case PDF_NodeType.HEADING:
             return headingHTMLElementName(node.str);
         case PDF_NodeType.CAPTION:
@@ -4034,6 +4300,10 @@ export function nodesToHTML(nodes: PDF_Node[]) {
 
         let id = nodeHTMLId(node, linkContext);
         let idAttr = id ? ` id="${escapeHTML(id)}"` : "";
+        let classAttr =
+            node.type == PDF_NodeType.AUTHOR ? ` class="authors"` :
+            node.type == PDF_NodeType.AFFILIATION ? ` class="affiliations"` :
+            "";
         if (node.type == PDF_NodeType.FIGURE) {
             let imageWidth = figureImageDisplayWidth(node.rect);
             let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
@@ -4054,7 +4324,7 @@ export function nodesToHTML(nodes: PDF_Node[]) {
         }
 
         let tag = nodeToHTMLElementName(node);
-        body.push(`<${tag}${idAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`);
+        body.push(`<${tag}${idAttr}${classAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`);
     }
 
     return `<!DOCTYPE html>
@@ -4066,6 +4336,8 @@ export function nodesToHTML(nodes: PDF_Node[]) {
         main { max-width: 760px; margin: 0 auto; line-height: 1.55; }
         main a { color: #0645ad; text-decoration: none; }
         main a:hover { text-decoration: underline; }
+        main > .authors { margin-bottom: 0.25rem; }
+        main > .affiliations { margin-bottom: 1.5rem; color: #495057; font-size: 0.9rem; }
         main > ul { margin: 0.4rem 1.25rem 0.9rem; padding-left: 1.1rem; }
         main > ul > li + li { margin-top: 0.2rem; }
         figure { margin: 1.5rem 0; }
