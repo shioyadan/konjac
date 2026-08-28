@@ -77,6 +77,15 @@ Konjacは、論文PDFを解析し、読みやすいプレーンなHTMLへ再構�
     make cli-json PDF="work/input.pdf" JSON_OUT="work/output.json"
     ```
 
+- **パスワード付きPDF**
+
+    ```sh
+    KONJAC_PDF_PASSWORD="password" make cli PDF="work/input.pdf" OUT="work/output.html"
+    node dist/cli/cli.cjs --password "password" work/input.pdf > work/output.html
+    ```
+
+    `KONJAC_PDF_PASSWORD` または `--password` でパスワードを指定できます。
+
 - **実行ファイル**
     - CLI本体は`dist/cli/cli.cjs`に生成されます。
 

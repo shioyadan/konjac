@@ -34,6 +34,12 @@
         .recent-file-list li { margin: 0.15rem 0; }
         .recent-file-list .text-button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
         .recent-file-list time { margin-left: 0.6rem; color: #6c757d; font-size: 0.75rem; }
+        #pdf-password-dialog { max-width: min(28rem, calc(100% - 2rem)); padding: 1.25rem; border: 1px solid #adb5bd; border-radius: 0.25rem; }
+        #pdf-password-dialog::backdrop { background: rgb(0 0 0 / 35%); }
+        #pdf-password-dialog form, #pdf-password-dialog label { display: grid; gap: 0.75rem; }
+        #pdf-password-dialog input { width: 100%; padding: 0.4rem 0.5rem; font: inherit; }
+        .dialog-actions { display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1rem; }
+        .dialog-actions button[value="cancel"] { order: -1; }
         .paragraph-toggle { margin-left: 0.4rem; font-size: 0.72rem; opacity: 0; }
         .source-linked:hover > .paragraph-toggle, .translatable:hover > .paragraph-toggle, .paragraph-toggle:focus { opacity: 1; }
         .translation-alternative { display: block; margin-top: 0.35rem; }
@@ -86,6 +92,16 @@
             <!-- md サイズ以上の場合に，2:8:2 で div を配置 -->
             <div class="viewer-side"></div>
             <div class="viewer-main">
+                <dialog id="pdf-password-dialog" data-export-exclude>
+                    <form method="dialog">
+                        <p id="pdf-password-message"></p>
+                        <label>Password <input id="pdf-password" type="password" autocomplete="off"></label>
+                        <div class="dialog-actions">
+                            <button type="submit" value="submit">Open PDF</button>
+                            <button type="submit" value="cancel">Cancel</button>
+                        </div>
+                    </form>
+                </dialog>
                 <div id="document-controls" data-export-exclude hidden>
                     <span id="translation-controls" hidden>
                         <button id="translate-document" type="button" class="text-button">Translate to Japanese</button>

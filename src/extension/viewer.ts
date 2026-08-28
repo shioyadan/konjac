@@ -1,7 +1,7 @@
 "use strict";
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import {loadPDF} from "../core/viewer";
+import {loadPDF, promptForPDFPassword} from "../core/viewer";
 import {recentFileName, recentFiles, rememberRecentFile, renderRecentFileList} from "../core/recent_files";
 
 pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url), {type: "module"});
@@ -20,7 +20,7 @@ renderRecentFiles();
 let targetURL = new URL(location.href).searchParams.get("file");
 if (targetURL) {
     console.log(targetURL);
-    loadPDF(targetURL).then(() => {
+    loadPDF(targetURL, targetURL, {requestPassword: promptForPDFPassword}).then(() => {
         rememberRecentFile({key: targetURL, name: recentFileName(targetURL), source: targetURL});
         renderRecentFiles();
     }).catch((error) => {
@@ -31,7 +31,8 @@ if (targetURL) {
             progress.hidden = true;
         }
         if (main) {
-            main.textContent = "Failed to load PDF.";
+            let detail = error instanceof Error ? ` ${error.message}` : "";
+            main.textContent = `Failed to load PDF.${detail}`;
         }
     });
 }

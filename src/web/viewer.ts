@@ -3,7 +3,7 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import PDFWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import {EmbeddedCMapReaderFactory} from "./embedded_cmaps";
-import {loadPDF} from "../core/viewer";
+import {loadPDF, promptForPDFPassword} from "../core/viewer";
 import {renderRecentFileList} from "../core/recent_files";
 import {
     loadRecentFileHandles,
@@ -18,7 +18,10 @@ import {
 
 pdfjsLib.GlobalWorkerOptions.workerPort = new PDFWorker();
 
-const WEB_PDF_OPTIONS = {CMapReaderFactory: EmbeddedCMapReaderFactory};
+const WEB_PDF_OPTIONS = {
+    CMapReaderFactory: EmbeddedCMapReaderFactory,
+    requestPassword: promptForPDFPassword
+};
 
 let fileInput = document.getElementById("pdf-file");
 let dropZone = document.getElementById("pdf-drop-zone");

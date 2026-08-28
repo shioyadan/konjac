@@ -30,6 +30,12 @@
         .drop-zone-hint { font-size: 0.9rem; }
         #web-status { display: block; min-height: 1.5em; margin-top: 0.4rem; color: #555; }
         #web-status.error { color: #a00; }
+        #pdf-password-dialog { max-width: min(28rem, calc(100% - 2rem)); padding: 1.25rem; border: 1px solid #adb5bd; border-radius: 0.25rem; }
+        #pdf-password-dialog::backdrop { background: rgb(0 0 0 / 35%); }
+        #pdf-password-dialog form, #pdf-password-dialog label { display: grid; gap: 0.75rem; }
+        #pdf-password-dialog input { width: 100%; padding: 0.4rem 0.5rem; font: inherit; }
+        .dialog-actions { display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1rem; }
+        .dialog-actions button[value="cancel"] { order: -1; }
         #document-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
         #translation-controls { display: inline-flex; align-items: center; gap: 0.75rem; }
         #document-controls[hidden], #translation-controls[hidden] { display: none; }
@@ -108,6 +114,16 @@
                         <ul id="recent-file-list" class="recent-file-list"></ul>
                     </details>
                 </div>
+                <dialog id="pdf-password-dialog" data-export-exclude>
+                    <form method="dialog">
+                        <p id="pdf-password-message"></p>
+                        <label>Password <input id="pdf-password" type="password" autocomplete="off"></label>
+                        <div class="dialog-actions">
+                            <button type="submit" value="submit">Open PDF</button>
+                            <button type="submit" value="cancel">Cancel</button>
+                        </div>
+                    </form>
+                </dialog>
                 <div id="document-controls" data-export-exclude hidden>
                     <span id="translation-controls" hidden>
                         <button id="translate-document" type="button" class="text-button">Translate to Japanese</button>

@@ -18,6 +18,7 @@ declare function require(moduleName: string): unknown;
 
 declare const process: {
     argv: string[];
+    env: {[key: string]: string | undefined};
     exitCode: number | undefined;
 };
 
@@ -45,13 +46,14 @@ const fs = require("fs") as {
 const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
-    console.error("usage: node dist/cli/cli.cjs [--html|--json] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
+    console.error("usage: node dist/cli/cli.cjs [--html|--json] [--password <password>] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
 }
 
 function parseArgs(args: string[]) {
     let mode: OutputMode = "html";
     let debugMaskDir = "";
     let debugScanCaption = "";
+    let password = process.env.KONJAC_PDF_PASSWORD;
     let fileName = "";
 
     for (let i = 0; i < args.length; i++) {
@@ -61,6 +63,16 @@ function parseArgs(args: string[]) {
         }
         else if (arg == "--json") {
             mode = "json";
+        }
+        else if (arg == "--password") {
+            password = args[++i];
+            if (password === undefined) {
+                usage();
+                return null;
+            }
+        }
+        else if (arg.startsWith("--password=")) {
+            password = arg.slice("--password=".length);
         }
         else if (arg == "--debug-mask") {
             debugMaskDir = args[++i] ?? "";
@@ -108,7 +120,7 @@ function parseArgs(args: string[]) {
         return null;
     }
 
-    return {mode, fileName, debugMaskDir, debugScanCaption};
+    return {mode, fileName, debugMaskDir, debugScanCaption, password};
 }
 
 async function renderPageCanvas(page: any) {
@@ -188,12 +200,19 @@ function writeDebugMaskDump(dir: string, dump: PDF_DebugMaskDump) {
     fs.writeFileSync(`${base}/page-${String(dump.page).padStart(3, "0")}-mask.svg`, dump.svg);
 }
 
-async function extractPDFFile(fileName: string, renderImages: boolean, debugMaskDir?: string, debugScanCaption?: string) {
+async function extractPDFFile(
+    fileName: string,
+    renderImages: boolean,
+    debugMaskDir?: string,
+    debugScanCaption?: string,
+    password?: string
+) {
     let loadingTask = pdfjsLib.getDocument({
         url: fileName,
         cMapPacked: true,
         cMapUrl: "node_modules/pdfjs-dist/cmaps/",
-        verbosity: 0
+        verbosity: 0,
+        ...(password !== undefined ? {password} : {})
     });
 
     let pdf = await loadingTask.promise;
@@ -224,7 +243,13 @@ async function main() {
         return;
     }
 
-    let nodes = await extractPDFFile(options.fileName, options.mode == "html", options.debugMaskDir, options.debugScanCaption);
+    let nodes = await extractPDFFile(
+        options.fileName,
+        options.mode == "html",
+        options.debugMaskDir,
+        options.debugScanCaption,
+        options.password
+    );
     if (options.mode == "json") {
         console.log(JSON.stringify(nodes, null, 2));
     }

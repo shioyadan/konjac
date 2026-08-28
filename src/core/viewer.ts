@@ -35,8 +35,11 @@ interface ChromeTranslatorFactory {
     }): Promise<ChromeTranslator>;
 }
 
+export type PDFPasswordReason = "need-password" | "incorrect-password";
+
 interface PDFLoadOptions {
     CMapReaderFactory?: new (options: {baseUrl?: string | null; isCompressed?: boolean}) => unknown;
+    requestPassword?: (reason: PDFPasswordReason) => string | null | Promise<string | null>;
 }
 
 declare global {
@@ -71,6 +74,38 @@ let selectedPDFSources: PDFSourceLocation[] = [];
 let selectedPDFElements: HTMLElement[] = [];
 let selectedPDFAnchor: HTMLElement | null = null;
 let selectedPDFRange: Range | null = null;
+
+// Web版と拡張版で共通のdialogを使い、入力したパスワードを呼び出し元へ一度だけ渡す。
+export function promptForPDFPassword(reason: PDFPasswordReason): Promise<string | null> {
+    let dialog = document.getElementById("pdf-password-dialog");
+    let message = document.getElementById("pdf-password-message");
+    let input = document.getElementById("pdf-password");
+    if (!(dialog instanceof HTMLDialogElement) || !(input instanceof HTMLInputElement)) {
+        return Promise.resolve(window.prompt(
+            reason == "incorrect-password"
+                ? "The password is incorrect. Please try again."
+                : "This PDF is password protected. Enter its password."
+        ));
+    }
+
+    if (message) {
+        message.textContent = reason == "incorrect-password"
+            ? "The password is incorrect. Please try again."
+            : "This PDF is password protected. Enter its password.";
+    }
+    input.value = "";
+    dialog.returnValue = "cancel";
+
+    return new Promise((resolve) => {
+        dialog.addEventListener("close", () => {
+            let password = dialog.returnValue == "submit" ? input.value : null;
+            input.value = "";
+            resolve(password);
+        }, {once: true});
+        dialog.showModal();
+        input.focus();
+    });
+}
 
 async function renderPageCanvas(page: any, scale = FIGURE_RENDER_SCALE) {
     let viewport = page.getViewport({scale});
@@ -1103,7 +1138,7 @@ async function enableTranslation() {
     }
 }
 
-export function loadPDF(source: string, sourceName = source, options: PDFLoadOptions = {}) {
+export async function loadPDF(source: string, sourceName = source, options: PDFLoadOptions = {}) {
     let progress = document.getElementById("progress") as HTMLProgressElement | null;
     let main = document.getElementById("main");
     let controls = document.getElementById("document-controls");
@@ -1140,6 +1175,27 @@ export function loadPDF(source: string, sourceName = source, options: PDFLoadOpt
             : {cMapUrl: "cmaps/"})
     });
 
+    let rejectPassword: ((error: unknown) => void) | undefined;
+    let passwordFailure = new Promise<never>((_resolve, reject) => rejectPassword = reject);
+    if (options.requestPassword) {
+        loadingTask.onPassword = (updatePassword: (password: string) => void, reason: number) => {
+            let passwordReason: PDFPasswordReason = reason == pdfjsLib.PasswordResponses.INCORRECT_PASSWORD
+                ? "incorrect-password"
+                : "need-password";
+            void Promise.resolve(options.requestPassword?.(passwordReason)).then((password) => {
+                if (password == null) {
+                    rejectPassword?.(new Error("Password entry was cancelled."));
+                    void loadingTask.destroy();
+                    return;
+                }
+                updatePassword(password);
+            }, (error) => {
+                rejectPassword?.(error);
+                void loadingTask.destroy();
+            });
+        };
+    }
+
     loadingTask.onProgress = ({loaded, total}: {loaded: number; total: number}) => {
         if (progress && total > 0) {
             progress.max = total;
@@ -1147,29 +1203,30 @@ export function loadPDF(source: string, sourceName = source, options: PDFLoadOpt
         }
     };
 
-    return loadingTask.promise.then(async (pdf) => {
+    let pdf = await (options.requestPassword
+        ? Promise.race([loadingTask.promise, passwordFailure])
+        : loadingTask.promise);
+    if (progress) {
+        progress.max = pdf.numPages;
+        progress.value = 0;
+    }
+    let pages: PDF_PageInput[] = [];
+    let pageProxies: any[] = [];
+    for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
+        let page = await pdf.getPage(pageNumber);
+        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>));
+        pageProxies.push(page);
         if (progress) {
-            progress.max = pdf.numPages;
-            progress.value = 0;
+            progress.value = pageNumber;
         }
-        let pages: PDF_PageInput[] = [];
-        let pageProxies: any[] = [];
-        for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
-            let page = await pdf.getPage(pageNumber);
-            pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>));
-            pageProxies.push(page);
-            if (progress) {
-                progress.value = pageNumber;
-            }
-        }
-        let nodes = extractNodesFromPages(pages);
-        await attachNodeImages(nodes, pageProxies);
-        show(nodes, pageProxies);
-        if (progress) {
-            progress.hidden = true;
-        }
-        enableHTMLExport(sourceName);
-        void enableTranslation();
-    });
+    }
+    let nodes = extractNodesFromPages(pages);
+    await attachNodeImages(nodes, pageProxies);
+    show(nodes, pageProxies);
+    if (progress) {
+        progress.hidden = true;
+    }
+    enableHTMLExport(sourceName);
+    void enableTranslation();
 }
 
