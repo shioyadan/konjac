@@ -159,3 +159,23 @@ export function matchTranslationDocument(document: TranslationDocument, fingerpr
         return {nodeIndex: entry.nodeIndex, block: imported};
     });
 }
+
+// 検証済みの非空翻訳だけをコピーしたノードへ適用し、元の抽出結果は構造判定用に保持する。
+export function translatedNodesFromDocument(
+    document: TranslationDocument,
+    fingerprint: string,
+    nodes: PDF_Node[]
+) {
+    let translatedNodes = nodes.map((node) => {
+        let translated = new PDF_Node(node.str, node.type, node.rect, node.sourceRect);
+        translated.imageSrc = node.imageSrc;
+        return translated;
+    });
+
+    for (let {nodeIndex, block} of matchTranslationDocument(document, fingerprint, nodes)) {
+        if (block.translation.trim() != "") {
+            translatedNodes[nodeIndex].str = block.translation;
+        }
+    }
+    return translatedNodes;
+}

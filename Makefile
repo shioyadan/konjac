@@ -2,10 +2,12 @@ PDF ?= work/test.pdf
 OUT ?= work/test.html
 JSON_OUT ?= work/test.json
 TRANSLATION_JSON_OUT ?= work/test.translation.json
+TRANSLATION_JSON_IN ?= work/test.translation.json
+TRANSLATED_HTML_OUT ?= work/test.translated.html
 WEB_HOST ?= 127.0.0.1
 WEB_PORT ?= 8765
 
-.PHONY: all typecheck extension-build web-build web-serve cli-build package cli cli-json cli-translation-json init clean distclean
+.PHONY: all typecheck extension-build web-build web-serve cli-build package cli cli-json cli-translation-json cli-import init clean distclean
 
 # 拡張版はCMapをディレクトリとして同梱し、Web版は単一HTMLへ埋め込む
 all: extension-build web-build cli-build
@@ -51,6 +53,10 @@ cli-json: cli-build
 cli-translation-json: cli-build
 	mkdir -p "$(dir $(TRANSLATION_JSON_OUT))"
 	node dist/cli/cli.cjs --translation-json "$(PDF)" > "$(TRANSLATION_JSON_OUT)"
+
+cli-import: cli-build
+	mkdir -p "$(dir $(TRANSLATED_HTML_OUT))"
+	node dist/cli/cli.cjs --import-translation "$(TRANSLATION_JSON_IN)" "$(PDF)" > "$(TRANSLATED_HTML_OUT)"
 
 init: package.json
 	npm install

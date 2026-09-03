@@ -11,7 +11,12 @@ import {
     extractPageInputFromPDFPage,
     nodesToHTML
 } from "../core/extractor";
-import {createTranslationDocument} from "../core/translation";
+import {
+    createTranslationDocument,
+    matchTranslationDocument,
+    parseTranslationDocument,
+    translatedNodesFromDocument
+} from "../core/translation";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs";
 
@@ -23,7 +28,7 @@ declare const process: {
     exitCode: number | undefined;
 };
 
-type OutputMode = "html" | "json" | "translation-json";
+type OutputMode = "html" | "json" | "translation-json" | "translated-html";
 
 interface NodeCanvasLike {
     width: number;
@@ -42,12 +47,13 @@ const {createCanvas} = require("canvas") as {
 };
 const fs = require("fs") as {
     mkdirSync: (path: string, options?: {recursive?: boolean}) => void;
+    readFileSync: (path: string, encoding: "utf8") => string;
     writeFileSync: (path: string, data: string) => void;
 };
 const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
-    console.error("usage: node dist/cli/cli.cjs [--html|--json|--translation-json] [--password <password>] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
+    console.error("usage: node dist/cli/cli.cjs [--html|--json|--translation-json|--import-translation <json-file>] [--password <password>] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
 }
 
 function parseArgs(args: string[]) {
@@ -56,6 +62,7 @@ function parseArgs(args: string[]) {
     let debugScanCaption = "";
     let password = process.env.KONJAC_PDF_PASSWORD;
     let fileName = "";
+    let translationFileName = "";
 
     for (let i = 0; i < args.length; i++) {
         let arg = args[i];
@@ -67,6 +74,22 @@ function parseArgs(args: string[]) {
         }
         else if (arg == "--translation-json") {
             mode = "translation-json";
+        }
+        else if (arg == "--import-translation") {
+            mode = "translated-html";
+            translationFileName = args[++i] ?? "";
+            if (!translationFileName) {
+                usage();
+                return null;
+            }
+        }
+        else if (arg.startsWith("--import-translation=")) {
+            mode = "translated-html";
+            translationFileName = arg.slice("--import-translation=".length);
+            if (!translationFileName) {
+                usage();
+                return null;
+            }
         }
         else if (arg == "--password") {
             password = args[++i];
@@ -124,7 +147,7 @@ function parseArgs(args: string[]) {
         return null;
     }
 
-    return {mode, fileName, debugMaskDir, debugScanCaption, password};
+    return {mode, fileName, translationFileName, debugMaskDir, debugScanCaption, password};
 }
 
 async function renderPageCanvas(page: any) {
@@ -240,7 +263,7 @@ async function extractPDFFile(
     let fingerprint = Array.isArray(pdf.fingerprints) && typeof pdf.fingerprints[0] == "string"
         ? pdf.fingerprints[0]
         : "";
-    return {nodes, fingerprint};
+    return {nodes, fingerprint, pageProxies};
 }
 
 async function main() {
@@ -249,8 +272,11 @@ async function main() {
         process.exitCode = 1;
         return;
     }
+    let translationDocument = options.mode == "translated-html"
+        ? parseTranslationDocument(fs.readFileSync(options.translationFileName, "utf8"))
+        : null;
 
-    let {nodes, fingerprint} = await extractPDFFile(
+    let {nodes, fingerprint, pageProxies} = await extractPDFFile(
         options.fileName,
         options.mode == "html",
         options.debugMaskDir,
@@ -262,6 +288,14 @@ async function main() {
     }
     else if (options.mode == "translation-json") {
         console.log(JSON.stringify(createTranslationDocument(options.fileName, fingerprint, nodes), null, 2));
+    }
+    else if (options.mode == "translated-html") {
+        if (!translationDocument) {
+            throw new Error("A translation JSON file is required.");
+        }
+        matchTranslationDocument(translationDocument, fingerprint, nodes);
+        await attachNodeImages(nodes, pageProxies);
+        console.log(nodesToHTML(translatedNodesFromDocument(translationDocument, fingerprint, nodes), nodes));
     }
     else {
         console.log(nodesToHTML(nodes));

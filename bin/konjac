@@ -5,12 +5,14 @@ set -eu
 usage() {
     cat >&2 <<'EOF'
 Usage: konjac <command> [options] <pdf-file> [output]
+       konjac import [options] <pdf-file> <translation-json> [output]
 
 Commands:
   html              Generate HTML (default: <pdf-name>.html)
   json              Generate extraction JSON (default: <pdf-name>.json)
   extract-json      Alias for json
   translation-json  Generate translation JSON (default: <pdf-name>.translation.json)
+  import            Import translation JSON and generate HTML
 
 Options:
   -o, --output <file>       Write to <file>; use - for standard output
@@ -23,6 +25,7 @@ Options:
 Examples:
   bin/konjac html paper.pdf
   bin/konjac translation-json paper.pdf translations/paper.json
+  bin/konjac import paper.pdf translations/paper.json paper.ja.html
   bin/konjac json --debug-mask /tmp/paper-mask paper.pdf -
 EOF
 }
@@ -51,6 +54,7 @@ fi
 
 command_name=$1
 shift
+translation_required=0
 case "$command_name" in
     html)
         cli_mode=--html
@@ -63,6 +67,11 @@ case "$command_name" in
     translation-json)
         cli_mode=--translation-json
         output_suffix=.translation.json
+        ;;
+    import|import-translation)
+        cli_mode=--import-translation
+        output_suffix=.translated.html
+        translation_required=1
         ;;
     -h|--help|help)
         usage
@@ -80,6 +89,19 @@ password_set=0
 debug_mask=
 debug_scan=
 pdf_file=
+translation_file=
+
+assign_argument() {
+    if [ -z "$pdf_file" ]; then
+        pdf_file=$1
+    elif [ "$translation_required" -eq 1 ] && [ -z "$translation_file" ]; then
+        translation_file=$1
+    elif [ -z "$output" ]; then
+        output=$1
+    else
+        fail "too many arguments"
+    fi
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -140,6 +162,9 @@ while [ $# -gt 0 ]; do
             ;;
         -)
             [ -n "$pdf_file" ] || fail "standard input is not supported for PDF files"
+            if [ "$translation_required" -eq 1 ] && [ -z "$translation_file" ]; then
+                fail "a translation JSON file is required before the output"
+            fi
             [ -z "$output" ] || fail "output was specified more than once"
             output=-
             shift
@@ -148,31 +173,23 @@ while [ $# -gt 0 ]; do
             fail "unknown option: $1"
             ;;
         *)
-            if [ -z "$pdf_file" ]; then
-                pdf_file=$1
-            elif [ -z "$output" ]; then
-                output=$1
-            else
-                fail "too many arguments"
-            fi
+            assign_argument "$1"
             shift
             ;;
     esac
 done
 
 while [ $# -gt 0 ]; do
-    if [ -z "$pdf_file" ]; then
-        pdf_file=$1
-    elif [ -z "$output" ]; then
-        output=$1
-    else
-        fail "too many arguments"
-    fi
+    assign_argument "$1"
     shift
 done
 
 [ -n "$pdf_file" ] || fail "a PDF file is required"
 [ -f "$pdf_file" ] || fail "PDF file not found: $pdf_file"
+if [ "$translation_required" -eq 1 ]; then
+    [ -n "$translation_file" ] || fail "a translation JSON file is required"
+    [ -f "$translation_file" ] || fail "translation JSON file not found: $translation_file"
+fi
 
 if [ -z "$output" ]; then
     pdf_dir=$(dirname -- "$pdf_file")
@@ -192,6 +209,10 @@ case "$debug_mask" in
     ""|/*) ;;
     *) debug_mask=$invocation_dir/$debug_mask ;;
 esac
+case "$translation_file" in
+    ""|/*) translation_argument=$translation_file ;;
+    *) translation_argument=$invocation_dir/$translation_file ;;
+esac
 
 if [ ! -f "$cli_file" ]; then
     command -v make >/dev/null 2>&1 || fail "CLI is not built and make is unavailable"
@@ -202,6 +223,9 @@ node_command=${KONJAC_NODE:-node}
 command -v "$node_command" >/dev/null 2>&1 || fail "Node.js executable not found: $node_command"
 
 set -- "$cli_mode"
+if [ "$translation_required" -eq 1 ]; then
+    set -- "$@" "$translation_argument"
+fi
 if [ "$password_set" -eq 1 ]; then
     set -- "$@" --password "$password"
 fi

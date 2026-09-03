@@ -32,7 +32,7 @@ Web版とChrome拡張では、画像を含まない翻訳用JSONを使って外�
 
 翻訳JSONにはPDF fingerprintと各ブロックの原文が含まれます。別のPDF、原文が変更されたJSON、抽出結果とブロック構成が異なるJSONは読み込まれません。図表画像はJSONに含まれず、図表内に描かれた文字は翻訳対象になりません。CLIの`make cli-json`が生成する抽出確認用JSONとは別の形式です。
 
-翻訳JSONはCLIの`make cli-translation-json`または`--translation-json`でも生成できます。生成後のimportは、同じPDFを開いたWeb版またはChrome拡張で行います。
+翻訳JSONはCLIの`make cli-translation-json`または`--translation-json`でも生成できます。編集後はWeb版・Chrome拡張に読み込めるほか、CLIで元PDFと照合して図表入りHTMLを生成できます。
 
 ## Web版として使う
 
@@ -85,9 +85,10 @@ Web版とChrome拡張では、画像を含まない翻訳用JSONを使って外�
     bin/konjac html work/input.pdf
     bin/konjac json work/input.pdf
     bin/konjac translation-json work/input.pdf
+    bin/konjac import work/input.pdf work/input.translation.json
     ```
 
-    出力先を省略するとPDFと同じディレクトリに`.html`、`.json`、`.translation.json`として保存します。出力先は第2引数または`-o`で指定でき、`-o -`では標準出力へ書き出します。既存ファイルを置き換える場合は`--force`が必要です。CLIが未ビルドの場合、`bin/konjac`は`make cli-build`を実行します。
+    出力先を省略するとPDFと同じディレクトリに`.html`、`.json`、`.translation.json`として保存します。`import`の既定出力は`.translated.html`です。出力先は最後の引数または`-o`で指定でき、`-o -`では標準出力へ書き出します。既存ファイルを置き換える場合は`--force`が必要です。CLIが未ビルドの場合、`bin/konjac`は`make cli-build`を実行します。
 
 - **HTMLへの変換**
 
@@ -107,6 +108,16 @@ Web版とChrome拡張では、画像を含まない翻訳用JSONを使って外�
     make cli-translation-json PDF="work/input.pdf" TRANSLATION_JSON_OUT="work/input.translation.json"
     node dist/cli/cli.cjs --translation-json work/input.pdf > work/input.translation.json
     ```
+
+- **翻訳用JSONからHTMLを生成**
+
+    ```sh
+    bin/konjac import work/input.pdf work/input.translation.json work/input.ja.html
+    make cli-import PDF="work/input.pdf" TRANSLATION_JSON_IN="work/input.translation.json" TRANSLATED_HTML_OUT="work/input.ja.html"
+    node dist/cli/cli.cjs --import-translation work/input.translation.json work/input.pdf > work/input.ja.html
+    ```
+
+    import時はPDF fingerprint、ブロック数、ID、種別、原文を検証します。翻訳が空のブロックは原文のまま残り、図表画像は元PDFから再生成してHTMLへ埋め込まれます。
 
 - **パスワード付きPDF**
 

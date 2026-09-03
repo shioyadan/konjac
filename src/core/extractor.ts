@@ -4277,15 +4277,24 @@ export function figureImageDisplayWidth(rect?: PDF_Rect) {
     return `${Math.round(width)}px`;
 }
 
-// CLI 出力用の最小 HTML を生成する。
-export function nodesToHTML(nodes: PDF_Node[]) {
-    let linkContext = buildHTMLLinkContext(nodes);
+// CLI 出力用の最小 HTML を生成する。翻訳時もタグ階層とリンク先は原文ノードから維持する。
+export function nodesToHTML(nodes: PDF_Node[], structureNodes: PDF_Node[] = nodes) {
+    if (nodes.length != structureNodes.length) {
+        throw new Error("HTML content and structure node counts do not match.");
+    }
+    let linkContext = buildHTMLLinkContext(structureNodes);
+    for (let [index, node] of nodes.entries()) {
+        let id = nodeHTMLId(structureNodes[index], linkContext);
+        if (id) {
+            linkContext.ids.set(node, id);
+        }
+    }
     let body: string[] = [];
 
     for (let index = 0; index < nodes.length; index++) {
         let node = nodes[index];
         let listEnd = index;
-        while (listEnd < nodes.length && bulletListItemText(nodes[listEnd]) != null) {
+        while (listEnd < nodes.length && bulletListItemText(structureNodes[listEnd]) != null) {
             listEnd++;
         }
         if (listEnd - index >= 2) {
@@ -4323,7 +4332,7 @@ export function nodesToHTML(nodes: PDF_Node[]) {
             continue;
         }
 
-        let tag = nodeToHTMLElementName(node);
+        let tag = nodeToHTMLElementName(structureNodes[index]);
         body.push(`<${tag}${idAttr}${classAttr}>${linkedNodeHTML(node, linkContext)}</${tag}>`);
     }
 
