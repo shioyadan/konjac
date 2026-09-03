@@ -79,6 +79,16 @@ Web版とChrome拡張では、画像を含まない翻訳用JSONを使って外�
 
 ## CLIとして使う
 
+- **シェルフロントエンド（推奨）**
+
+    ```sh
+    bin/konjac html work/input.pdf
+    bin/konjac json work/input.pdf
+    bin/konjac translation-json work/input.pdf
+    ```
+
+    出力先を省略するとPDFと同じディレクトリに`.html`、`.json`、`.translation.json`として保存します。出力先は第2引数または`-o`で指定でき、`-o -`では標準出力へ書き出します。既存ファイルを置き換える場合は`--force`が必要です。CLIが未ビルドの場合、`bin/konjac`は`make cli-build`を実行します。
+
 - **HTMLへの変換**
 
     ```sh
@@ -108,7 +118,8 @@ Web版とChrome拡張では、画像を含まない翻訳用JSONを使って外�
     `KONJAC_PDF_PASSWORD` または `--password` でパスワードを指定できます。
 
 - **実行ファイル**
-    - CLI本体は`dist/cli/cli.cjs`に生成されます。
+    - 管理対象のシェルフロントエンドは`bin/konjac`です。
+    - `make cli-build`により、CLI本体は`dist/cli/cli.cjs`、シェルフロントエンドの配布用コピーは`dist/cli/konjac`に生成されます。
 
 ## ビルド
 

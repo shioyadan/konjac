@@ -37,6 +37,8 @@ package: extension-build web-build
 cli-build:
 	npx webpack --config=webpack.cli.config.cjs
 	cp node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs dist/cli/pdf.worker.mjs
+	cp bin/konjac dist/cli/konjac
+	chmod +x dist/cli/konjac
 
 cli: cli-build
 	mkdir -p "$(dir $(OUT))"
