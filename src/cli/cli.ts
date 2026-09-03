@@ -11,6 +11,7 @@ import {
     extractPageInputFromPDFPage,
     nodesToHTML
 } from "../core/extractor";
+import {createTranslationDocument} from "../core/translation";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs";
 
@@ -22,7 +23,7 @@ declare const process: {
     exitCode: number | undefined;
 };
 
-type OutputMode = "html" | "json";
+type OutputMode = "html" | "json" | "translation-json";
 
 interface NodeCanvasLike {
     width: number;
@@ -46,7 +47,7 @@ const fs = require("fs") as {
 const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
-    console.error("usage: node dist/cli/cli.cjs [--html|--json] [--password <password>] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
+    console.error("usage: node dist/cli/cli.cjs [--html|--json|--translation-json] [--password <password>] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
 }
 
 function parseArgs(args: string[]) {
@@ -63,6 +64,9 @@ function parseArgs(args: string[]) {
         }
         else if (arg == "--json") {
             mode = "json";
+        }
+        else if (arg == "--translation-json") {
+            mode = "translation-json";
         }
         else if (arg == "--password") {
             password = args[++i];
@@ -233,7 +237,10 @@ async function extractPDFFile(
     if (renderImages) {
         await attachNodeImages(nodes, pageProxies);
     }
-    return nodes;
+    let fingerprint = Array.isArray(pdf.fingerprints) && typeof pdf.fingerprints[0] == "string"
+        ? pdf.fingerprints[0]
+        : "";
+    return {nodes, fingerprint};
 }
 
 async function main() {
@@ -243,7 +250,7 @@ async function main() {
         return;
     }
 
-    let nodes = await extractPDFFile(
+    let {nodes, fingerprint} = await extractPDFFile(
         options.fileName,
         options.mode == "html",
         options.debugMaskDir,
@@ -252,6 +259,9 @@ async function main() {
     );
     if (options.mode == "json") {
         console.log(JSON.stringify(nodes, null, 2));
+    }
+    else if (options.mode == "translation-json") {
+        console.log(JSON.stringify(createTranslationDocument(options.fileName, fingerprint, nodes), null, 2));
     }
     else {
         console.log(nodesToHTML(nodes));

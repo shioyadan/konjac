@@ -15,6 +15,12 @@ import {
     nodeHTMLId,
     nodeToHTMLElementName
 } from "./extractor";
+import {
+    TranslationDocument,
+    createTranslationDocument,
+    matchTranslationDocument,
+    parseTranslationDocument
+} from "./translation";
 
 console.log("initialized.");
 
@@ -40,6 +46,12 @@ export type PDFPasswordReason = "need-password" | "incorrect-password";
 interface PDFLoadOptions {
     CMapReaderFactory?: new (options: {baseUrl?: string | null; isCompressed?: boolean}) => unknown;
     requestPassword?: (reason: PDFPasswordReason) => string | null | Promise<string | null>;
+}
+
+interface TranslationContext {
+    sourceName: string;
+    fingerprint: string;
+    nodes: PDF_Node[];
 }
 
 declare global {
@@ -69,11 +81,13 @@ interface PDFSourcePageImage {
 
 const pdfSourceLocations = new WeakMap<HTMLElement, PDFSourceLocation>();
 const pdfSourcePageImages = new WeakMap<object, Promise<PDFSourcePageImage | null>>();
+const translationElements = new Map<number, HTMLElement>();
 let pdfSelectionButton: HTMLButtonElement | null = null;
 let selectedPDFSources: PDFSourceLocation[] = [];
 let selectedPDFElements: HTMLElement[] = [];
 let selectedPDFAnchor: HTMLElement | null = null;
 let selectedPDFRange: Range | null = null;
+let translationContext: TranslationContext | null = null;
 
 // Web版と拡張版で共通のdialogを使い、入力したパスワードを呼び出し元へ一度だけ渡す。
 export function promptForPDFPassword(reason: PDFPasswordReason): Promise<string | null> {
@@ -227,6 +241,7 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
     }
 
     main.replaceChildren();
+    translationElements.clear();
     let linkContext = buildHTMLLinkContext(nodes);
 
     for (let index = 0; index < nodes.length; index++) {
@@ -237,11 +252,12 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
         }
         if (listEnd - index >= 2) {
             let list = document.createElement("ul");
-            for (let item of nodes.slice(index, listEnd)) {
+            for (let [offset, item] of nodes.slice(index, listEnd).entries()) {
                 let li = document.createElement("li");
                 li.innerHTML = linkedNodeHTML({...item, str: bulletListItemText(item) ?? item.str}, linkContext);
                 rememberPDFSource(li, item, pageProxies);
                 attachPDFSourceToggle(li);
+                translationElements.set(index + offset, li);
                 list.appendChild(li);
             }
             main.appendChild(list);
@@ -273,6 +289,7 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
             caption.style.textAlign = "left";
             rememberPDFSource(caption, node, pageProxies);
             attachPDFSourceToggle(caption);
+            translationElements.set(index, caption);
             figure.appendChild(caption);
             main.appendChild(figure);
             continue;
@@ -312,15 +329,16 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
         div.innerHTML = linkedNodeHTML(node, linkContext);
         rememberPDFSource(div, node, pageProxies);
         attachPDFSourceToggle(div);
+        translationElements.set(index, div);
         main.appendChild(div);
     }
     enablePDFSelection();
 }
 
-function htmlFileName(pdfURL: string) {
-    let path = pdfURL;
+function documentBaseName(sourceName: string) {
+    let path = sourceName;
     try {
-        path = new URL(pdfURL).pathname;
+        path = new URL(sourceName).pathname;
     }
     catch {
         // URL でない場合は入力をパスとして扱う。
@@ -333,7 +351,24 @@ function htmlFileName(pdfURL: string) {
     catch {
         // 不正な percent encoding はそのままファイル名に使う。
     }
-    return `${name.replace(/\.pdf$/i, "") || "document"}.html`;
+    return name.replace(/\.pdf$/i, "") || "document";
+}
+
+function htmlFileName(sourceName: string) {
+    return `${documentBaseName(sourceName)}.html`;
+}
+
+function translationJSONFileName(sourceName: string) {
+    return `${documentBaseName(sourceName)}.translation.json`;
+}
+
+function downloadFile(fileName: string, type: string, contents: BlobPart[]) {
+    let blobURL = URL.createObjectURL(new Blob(contents, {type}));
+    let link = document.createElement("a");
+    link.href = blobURL;
+    link.download = fileName;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(blobURL));
 }
 
 function exportedTranslationContent(exported: HTMLElement) {
@@ -364,30 +399,187 @@ function exportHTML(pdfURL: string) {
         title.textContent = fileName.replace(/\.html$/i, "");
     }
 
-    let blobURL = URL.createObjectURL(new Blob(
-        ["<!DOCTYPE html>\n", exported.outerHTML],
-        {type: "text/html;charset=utf-8"}
-    ));
-    let link = document.createElement("a");
-    link.href = blobURL;
-    link.download = fileName;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(blobURL));
+    downloadFile(fileName, "text/html;charset=utf-8", ["<!DOCTYPE html>\n", exported.outerHTML]);
+}
+
+function closeDocumentMenu() {
+    let menu = document.getElementById("document-menu");
+    if (menu instanceof HTMLDetailsElement) {
+        menu.open = false;
+    }
 }
 
 function enableHTMLExport(pdfURL: string) {
     let controls = document.getElementById("document-controls");
     let button = document.getElementById("export-html");
+    let menu = document.getElementById("document-menu");
     if (controls && button instanceof HTMLButtonElement) {
         controls.hidden = false;
-        button.onclick = () => exportHTML(pdfURL);
+        button.onclick = () => {
+            closeDocumentMenu();
+            exportHTML(pdfURL);
+        };
+    }
+    if (menu instanceof HTMLDetailsElement) {
+        menu.onkeydown = (event) => {
+            if (event.key == "Escape") {
+                menu.open = false;
+                menu.querySelector<HTMLElement>(":scope > summary")?.focus();
+            }
+        };
+        if (menu.dataset.behaviorEnabled != "true") {
+            menu.dataset.behaviorEnabled = "true";
+            menu.addEventListener("focusout", (event) => {
+                if (event.relatedTarget instanceof Node && !menu.contains(event.relatedTarget)) {
+                    menu.open = false;
+                }
+            });
+        }
     }
 }
 
+function translationDocument(): TranslationDocument {
+    if (!translationContext) {
+        throw new Error("Open a PDF before exporting translations.");
+    }
+    return createTranslationDocument(
+        translationContext.sourceName,
+        translationContext.fingerprint,
+        translationContext.nodes,
+        (_node, nodeIndex) => translationElements.get(nodeIndex)
+            ?.querySelector<HTMLElement>(":scope > .translation-japanese")?.textContent ?? ""
+    );
+}
+
+function exportTranslationJSON() {
+    if (!translationContext) {
+        return;
+    }
+    let contents = `${JSON.stringify(translationDocument(), null, 2)}\n`;
+    downloadFile(
+        translationJSONFileName(translationContext.sourceName),
+        "application/json;charset=utf-8",
+        [contents]
+    );
+}
+
+function showImportedTranslationControls() {
+    let controls = document.getElementById("translation-controls");
+    let translateButton = document.getElementById("translate-document");
+    let originalsButton = document.getElementById("toggle-document-originals");
+    if (controls) {
+        controls.hidden = false;
+    }
+    if (translateButton instanceof HTMLButtonElement) {
+        translateButton.hidden = true;
+    }
+    if (originalsButton instanceof HTMLButtonElement) {
+        originalsButton.hidden = false;
+    }
+    setDocumentOriginalsVisible(false);
+}
+
+function importTranslationDocument(document: TranslationDocument) {
+    if (!translationContext) {
+        throw new Error("Open the source PDF before importing translations.");
+    }
+    let matched = matchTranslationDocument(
+        document,
+        translationContext.fingerprint,
+        translationContext.nodes
+    ).map(({nodeIndex, block}) => {
+        let element = translationElements.get(nodeIndex);
+        if (!element) {
+            throw new Error(`Translation block ${block.id} is not displayed.`);
+        }
+        return {nodeIndex, block, element};
+    });
+    let translatedCount = 0;
+    for (let {nodeIndex, block, element} of matched) {
+        if (block.translation.trim() == "") {
+            continue;
+        }
+        attachTranslation(element, block.translation);
+        let node = translationContext.nodes[nodeIndex];
+        if (node?.type == PDF_NodeType.FIGURE) {
+            let image = element.parentElement?.querySelector<HTMLImageElement>(":scope > img");
+            if (image) {
+                image.alt = block.translation;
+            }
+        }
+        translatedCount++;
+    }
+    if (translatedCount > 0) {
+        showImportedTranslationControls();
+    }
+    return translatedCount;
+}
+
+function setTranslationFileStatus(message: string, error = false) {
+    let status = document.getElementById("translation-file-status");
+    if (status) {
+        status.textContent = message;
+        status.classList.toggle("error", error);
+    }
+}
+
+function enableTranslationJSON(sourceName: string, fingerprint: string, nodes: PDF_Node[]) {
+    translationContext = {sourceName, fingerprint, nodes};
+    let exportButton = document.getElementById("export-translation-json");
+    let importButton = document.getElementById("import-translation-json");
+    let fileInput = document.getElementById("translation-json-file");
+    if (
+        !(exportButton instanceof HTMLButtonElement) ||
+        !(importButton instanceof HTMLButtonElement) ||
+        !(fileInput instanceof HTMLInputElement)
+    ) {
+        return;
+    }
+
+    exportButton.onclick = () => {
+        closeDocumentMenu();
+        exportTranslationJSON();
+    };
+    importButton.onclick = () => {
+        closeDocumentMenu();
+        setTranslationFileStatus("");
+        fileInput.value = "";
+        fileInput.click();
+    };
+    fileInput.onchange = async () => {
+        let file = fileInput.files?.[0];
+        if (!file) {
+            return;
+        }
+        importButton.disabled = true;
+        setTranslationFileStatus(`Importing ${file.name}…`);
+        try {
+            let translatedCount = importTranslationDocument(parseTranslationDocument(await file.text()));
+            setTranslationFileStatus(
+                translatedCount > 0
+                    ? `Imported ${translatedCount} translated blocks.`
+                    : "No non-empty translations were found."
+            );
+        }
+        catch (error) {
+            console.warn("Failed to import translation JSON", error);
+            setTranslationFileStatus(
+                error instanceof Error ? error.message : "Failed to import translation JSON.",
+                true
+            );
+        }
+        finally {
+            importButton.disabled = false;
+            fileInput.value = "";
+        }
+    };
+}
+
 function translatableElements() {
-    return Array.from(document.querySelectorAll<HTMLElement>(
-        "#main > p, #main > h1, #main > h2, #main > h3, #main > h4, #main > h5, #main > h6, #main > ul > li, #main > figcaption, #main > figure > figcaption"
-    )).filter((element) => translatableText(element) != "");
+    return [...translationElements.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, element]) => element)
+        .filter((element) => translatableText(element) != "");
 }
 
 function translatableText(element: HTMLElement) {
@@ -991,6 +1183,14 @@ function attachPDFSourceToggle(element: HTMLElement) {
 }
 
 function attachTranslation(element: HTMLElement, translatedText: string) {
+    let existing = element.querySelector<HTMLElement>(":scope > .translation-japanese");
+    if (existing) {
+        existing.textContent = translatedText;
+        element.lang = "ja";
+        setElementOriginalVisible(element, false);
+        return;
+    }
+
     let pdfToggle = element.querySelector<HTMLElement>(":scope > .pdf-source-toggle");
     let pdfPreview = element.querySelector<HTMLElement>(":scope > .pdf-source-preview");
     pdfToggle?.remove();
@@ -1131,6 +1331,11 @@ async function enableTranslation() {
         }
         controls.hidden = false;
         translationControls.hidden = false;
+        if (document.querySelector("#main .translatable")) {
+            button.hidden = true;
+            return;
+        }
+        button.hidden = false;
         button.onclick = () => void translateDocument();
     }
     catch (error) {
@@ -1146,6 +1351,8 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
     let translateButton = document.getElementById("translate-document");
     let originalsButton = document.getElementById("toggle-document-originals");
     let translationStatus = document.getElementById("translation-status");
+    translationContext = null;
+    translationElements.clear();
     main?.replaceChildren();
     if (controls) {
         controls.hidden = true;
@@ -1154,7 +1361,7 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
         translationControls.hidden = true;
     }
     if (translateButton instanceof HTMLButtonElement) {
-        translateButton.hidden = false;
+        translateButton.hidden = true;
         translateButton.disabled = false;
     }
     if (originalsButton instanceof HTMLButtonElement) {
@@ -1163,6 +1370,7 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
     if (translationStatus) {
         translationStatus.textContent = "";
     }
+    setTranslationFileStatus("");
     if (progress) {
         progress.hidden = false;
         progress.removeAttribute("value");
@@ -1227,6 +1435,10 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
         progress.hidden = true;
     }
     enableHTMLExport(sourceName);
+    let fingerprint = Array.isArray(pdf.fingerprints) && typeof pdf.fingerprints[0] == "string"
+        ? pdf.fingerprints[0]
+        : "";
+    enableTranslationJSON(sourceName, fingerprint, nodes);
     void enableTranslation();
 }
 

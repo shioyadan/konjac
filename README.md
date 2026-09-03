@@ -21,6 +21,19 @@ Konjacは、論文PDFを解析し、読みやすいプレーンなHTMLへ再構�
     - PDF表示はドラッグで移動、`Ctrl+wheel`で拡大縮小、右下のハンドルで高さを変更できます。
 4. 翻訳後は、文書全体または段落ごとに原文を併記できます。「Export HTML」を押すと、その時点の翻訳・原文表示と図表を含む文書を、単独で開けるHTMLファイルとして保存できます。
 
+## 翻訳JSONを使う
+
+Web版とChrome拡張では、画像を含まない翻訳用JSONを使って外部で作成した翻訳を読み込めます。
+
+1. PDFを開き、「Export translation JSON」を押します。
+2. 出力された`*.translation.json`の`blocks[].translation`だけを翻訳して保存します。`source`など、ほかのフィールドは変更しません。
+3. 同じPDFを開いたKonjacで「Import translation JSON」を押し、編集したJSONを選択します。
+4. 翻訳と原文表示を確認し、「Export HTML」で図表を埋め込んだ単一HTMLを保存します。
+
+翻訳JSONにはPDF fingerprintと各ブロックの原文が含まれます。別のPDF、原文が変更されたJSON、抽出結果とブロック構成が異なるJSONは読み込まれません。図表画像はJSONに含まれず、図表内に描かれた文字は翻訳対象になりません。CLIの`make cli-json`が生成する抽出確認用JSONとは別の形式です。
+
+翻訳JSONはCLIの`make cli-translation-json`または`--translation-json`でも生成できます。生成後のimportは、同じPDFを開いたWeb版またはChrome拡張で行います。
+
 ## Web版として使う
 
 - **起動**
@@ -61,6 +74,7 @@ Konjacは、論文PDFを解析し、読みやすいプレーンなHTMLへ再構�
     - 翻訳後は、文書全体または段落ごとに原文を併記できます。
     - 初回は翻訳用の言語パックをダウンロードすることがあります。
 - **エクスポート**
+    - 「Export translation JSON」と「Import translation JSON」で、画像を含まない翻訳データを外部とやり取りできます。
     - 「Export HTML」を押すと、表示結果を単一HTMLとして保存できます。
 
 ## CLIとして使う
@@ -71,10 +85,17 @@ Konjacは、論文PDFを解析し、読みやすいプレーンなHTMLへ再構�
     make cli PDF="work/input.pdf" OUT="work/output.html"
     ```
 
-- **JSONへの出力**
+- **抽出結果JSONへの出力**
 
     ```sh
     make cli-json PDF="work/input.pdf" JSON_OUT="work/output.json"
+    ```
+
+- **翻訳用JSONへの出力**
+
+    ```sh
+    make cli-translation-json PDF="work/input.pdf" TRANSLATION_JSON_OUT="work/input.translation.json"
+    node dist/cli/cli.cjs --translation-json work/input.pdf > work/input.translation.json
     ```
 
 - **パスワード付きPDF**
