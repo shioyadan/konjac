@@ -2510,11 +2510,37 @@ function scanVerticalSpanFromCaption(
         }
 
         let currentSpanRows = firstContent < 0 ? 0 : Math.abs(lastContent - firstContent) + 1;
-        let strongInternalResume =
+        let internalResume =
             emptyRows < separatedGapRows &&
             currentSpanRows < emptyGapLimit &&
             targetCount >= strongResumeTargetLimit;
-        if ((hasTarget || hasSoftContent) && emptyRows >= blockerGapRows && !strongInternalResume) {
+        // 上下に並ぶパネルは、下段の高さに関係なく短い空白の先まで追う。
+        // パネル端の短いラベルも含めるが、図形から再開する場合は先にも図形が続くことを確認する。
+        // 孤立した横罫線だけでは再開せず、直上にある別の表を巻き込まないようにする。
+        if (
+            !internalResume && direction > 0 && hasTarget &&
+            emptyRows >= blockerGapRows && emptyRows < separatedGapRows
+        ) {
+            if (rowBitCount(mask, y, range.x0, range.x1, MASK_SHAPE) == 0) {
+                internalResume = true;
+            }
+            else {
+                let shapeRows = 0;
+                for (let nextY = y; nextY < Math.min(range.y1, y + separatedGapRows); nextY++) {
+                    if (rowBitCount(mask, nextY, range.x0, range.x1, MASK_HARD_TEXT_BLOCKER) > 0) {
+                        break;
+                    }
+                    if (rowBitCount(mask, nextY, range.x0, range.x1, MASK_SHAPE) > 0) {
+                        shapeRows++;
+                    }
+                }
+                internalResume = shapeRows >= Math.max(4, blockerGapRows * 2);
+            }
+            if (internalResume) {
+                log?.(`vertical: y=${y} emptyRows=${emptyRows} -> resume stacked figure content`);
+            }
+        }
+        if ((hasTarget || hasSoftContent) && emptyRows >= blockerGapRows && !internalResume) {
             log?.(`vertical: y=${y} target=${targetCount} soft=${softCount} emptyRows=${emptyRows} -> stop before separated content`);
             return spanRangeFromRowsToBlocker(range, firstContent, lastContent, y, direction);
         }
