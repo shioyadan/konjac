@@ -1344,6 +1344,7 @@ async function enableTranslation() {
 }
 
 export async function loadPDF(source: string, sourceName = source, options: PDFLoadOptions = {}) {
+    document.title = documentBaseName(sourceName);
     let progress = document.getElementById("progress") as HTMLProgressElement | null;
     let main = document.getElementById("main");
     let controls = document.getElementById("document-controls");
@@ -1429,6 +1430,8 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
         }
     }
     let nodes = extractNodesFromPages(pages);
+    let title = nodes.find((node) => node.type == PDF_NodeType.TITLE)?.str.trim();
+    document.title = title?.replace(/\s+/g, " ") || documentBaseName(sourceName);
     await attachNodeImages(nodes, pageProxies);
     show(nodes, pageProxies);
     if (progress) {
