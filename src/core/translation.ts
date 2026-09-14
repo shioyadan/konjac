@@ -145,7 +145,8 @@ export function matchTranslationDocument(document: TranslationDocument, fingerpr
         importedById.set(block.id, block);
     }
 
-    return expectedEntries.map((entry) => {
+    let sourceMismatchIds: string[] = [];
+    let entries = expectedEntries.map((entry) => {
         let imported = importedById.get(entry.block.id);
         if (!imported) {
             throw new Error(`Missing translation block: ${entry.block.id}.`);
@@ -154,16 +155,27 @@ export function matchTranslationDocument(document: TranslationDocument, fingerpr
             throw new Error(`The type of ${entry.block.id} was changed.`);
         }
         if (imported.source != entry.block.source) {
-            throw new Error(`The source text of ${entry.block.id} was changed.`);
+            sourceMismatchIds.push(entry.block.id);
         }
         return {nodeIndex: entry.nodeIndex, block: imported};
     });
+    let warnings: string[] = [];
+    if (sourceMismatchIds.length > 0) {
+        let ids = sourceMismatchIds.slice(0, 5).join(", ");
+        if (sourceMismatchIds.length > 5) {
+            ids += ", …";
+        }
+        warnings.push(
+            `Source text differs from the PDF in ${sourceMismatchIds.length} block(s) (${ids}). ` +
+            "Blocks were matched by ID. Please review the translations."
+        );
+    }
+    return {entries, warnings};
 }
 
 // 検証済みの非空翻訳だけをコピーしたノードへ適用し、元の抽出結果は構造判定用に保持する。
-export function translatedNodesFromDocument(
-    document: TranslationDocument,
-    fingerprint: string,
+export function translatedNodesFromEntries(
+    entries: TranslationBlockEntry[],
     nodes: PDF_Node[]
 ) {
     let translatedNodes = nodes.map((node) => {
@@ -172,7 +184,7 @@ export function translatedNodesFromDocument(
         return translated;
     });
 
-    for (let {nodeIndex, block} of matchTranslationDocument(document, fingerprint, nodes)) {
+    for (let {nodeIndex, block} of entries) {
         if (block.translation.trim() != "") {
             translatedNodes[nodeIndex].str = block.translation;
         }

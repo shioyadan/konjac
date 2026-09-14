@@ -15,7 +15,7 @@ import {
     createTranslationDocument,
     matchTranslationDocument,
     parseTranslationDocument,
-    translatedNodesFromDocument
+    translatedNodesFromEntries
 } from "../core/translation";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs";
@@ -293,9 +293,10 @@ async function main() {
         if (!translationDocument) {
             throw new Error("A translation JSON file is required.");
         }
-        matchTranslationDocument(translationDocument, fingerprint, nodes);
+        let {entries, warnings} = matchTranslationDocument(translationDocument, fingerprint, nodes);
+        warnings.forEach((warning) => console.warn(`Warning: ${warning}`));
         await attachNodeImages(nodes, pageProxies);
-        console.log(nodesToHTML(translatedNodesFromDocument(translationDocument, fingerprint, nodes), nodes));
+        console.log(nodesToHTML(translatedNodesFromEntries(entries, nodes), nodes));
     }
     else {
         console.log(nodesToHTML(nodes));

@@ -58,7 +58,9 @@ WSL上の`file://wsl.localhost/...`では、保存済みファイルハンドル
 3. 同じPDFに「Import translation JSON」で読み込みます。
 4. 内容を確認し、「Export HTML」で図表入りHTMLを保存します。
 
-`source`、`id`、`type`など、`translation`以外のフィールドは変更しないでください。import時にはPDF fingerprint、ブロック数、ID、種別、原文を検証するため、別のPDFや構造が変わったJSONは読み込めません。
+`source`、`id`、`type`など、`translation`以外のフィールドは変更しないでください。import時にはPDF fingerprint、ブロック数、ID、種別を検証するため、別のPDFや構造が変わったJSONは読み込めません。
+
+`blocks[].source`だけが原文と異なる場合は、ブロックIDで照合して読み込みを続けます。不一致の件数と該当ID（先頭5件まで）をWeb版・拡張では画面上に、CLIでは標準エラー出力に警告として表示します。警告が出た場合は、翻訳が対応する原文に合っているか確認してください。
 
 翻訳JSONに図表画像は含まれません。図表内に画像として描かれた文字も翻訳対象外です。CLIの抽出確認用JSONとは別の形式です。
 

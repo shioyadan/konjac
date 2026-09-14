@@ -483,11 +483,12 @@ function importTranslationDocument(document: TranslationDocument) {
     if (!translationContext) {
         throw new Error("Open the source PDF before importing translations.");
     }
-    let matched = matchTranslationDocument(
+    let {entries, warnings} = matchTranslationDocument(
         document,
         translationContext.fingerprint,
         translationContext.nodes
-    ).map(({nodeIndex, block}) => {
+    );
+    let matched = entries.map(({nodeIndex, block}) => {
         let element = translationElements.get(nodeIndex);
         if (!element) {
             throw new Error(`Translation block ${block.id} is not displayed.`);
@@ -512,14 +513,15 @@ function importTranslationDocument(document: TranslationDocument) {
     if (translatedCount > 0) {
         showImportedTranslationControls();
     }
-    return translatedCount;
+    return {translatedCount, warnings};
 }
 
-function setTranslationFileStatus(message: string, error = false) {
+function setTranslationFileStatus(message: string, kind: "info" | "warning" | "error" = "info") {
     let status = document.getElementById("translation-file-status");
     if (status) {
         status.textContent = message;
-        status.classList.toggle("error", error);
+        status.classList.toggle("error", kind == "error");
+        status.classList.toggle("warning", kind == "warning");
     }
 }
 
@@ -554,18 +556,20 @@ function enableTranslationJSON(sourceName: string, fingerprint: string, nodes: P
         importButton.disabled = true;
         setTranslationFileStatus(`Importing ${file.name}…`);
         try {
-            let translatedCount = importTranslationDocument(parseTranslationDocument(await file.text()));
+            let {translatedCount, warnings} = importTranslationDocument(parseTranslationDocument(await file.text()));
+            let message = translatedCount > 0
+                ? `Imported ${translatedCount} translated blocks.`
+                : "No non-empty translations were found.";
             setTranslationFileStatus(
-                translatedCount > 0
-                    ? `Imported ${translatedCount} translated blocks.`
-                    : "No non-empty translations were found."
+                [message, ...warnings.map((warning) => `Warning: ${warning}`)].join(" "),
+                warnings.length > 0 ? "warning" : "info"
             );
         }
         catch (error) {
             console.warn("Failed to import translation JSON", error);
             setTranslationFileStatus(
                 error instanceof Error ? error.message : "Failed to import translation JSON.",
-                true
+                "error"
             );
         }
         finally {
