@@ -4,6 +4,7 @@
     "regions": [
       {"caption": "Figure 1:", "page": 1, "content": [335, 445, 205, 225], "exclude": [[200, 600]]},
       {"caption": "Figure 5:", "page": 4, "content": [342, 121, 205, 59], "exclude": [[450, 195]]},
+      {"caption": "Table 1:", "page": 7, "content": [328, 406, 214, 49], "exclude": [[440, 470]]},
       {"caption": "Table 2:", "page": 9, "content": [57, 90, 235, 217], "exclude": [[330, 200]]},
       {"caption": "Figure 17:", "page": 11, "content": [60, 610, 485, 115]}
     ]
@@ -20,7 +21,17 @@
   "test4": {
     "figures": 14, "equations": 13,
     "regions": [
+      {"equation": "1", "page": 3, "content": [100, 161, 185, 11], "exclude": [[180, 129]]},
+      {"equation": "2", "page": 3, "content": [89, 125, 196, 10], "exclude": [[180, 166]]},
+      {"equation": "3", "page": 4, "content": [108, 474, 177, 10]},
+      {"equation": "4", "page": 4, "content": [53, 334, 232, 42]},
+      {"equation": "5", "page": 4, "content": [62, 238, 223, 42]},
+      {"equation": "6", "page": 4, "content": [353, 297, 190, 9]},
+      {"equation": "7", "page": 5, "content": [112, 622, 173, 10]},
+      {"equation": "8", "page": 5, "content": [122, 427, 163, 12]},
       {"equation": "9", "page": 5, "content": [87, 185, 195, 29]},
+      {"equation": "10", "page": 5, "content": [116, 80, 169, 10]},
+      {"equation": "11", "page": 5, "content": [344, 628, 199, 23]},
       {"equation": "12", "page": 5, "content": [321, 533, 220, 44]},
       {"equation": "13", "page": 5, "content": [313, 402, 230, 52]}
     ]
@@ -70,8 +81,21 @@
     "regions": [
       {"caption": "TABLE IV ", "page": 8, "content": [50, 456, 510, 253], "exclude": [[160, 360], [420, 200]]},
       {"caption": "Fig. 7.", "page": 6, "content": [350, 375, 182, 350]},
+      {"equation": "1", "page": 1, "content": [49, 141, 246, 9]},
+      {"equation": "2", "page": 3, "content": [49, 189, 246, 20], "exclude": [[170, 160]]},
+      {"equation": "3", "page": 3, "content": [49, 156, 244, 17], "exclude": [[170, 200]]},
+      {"equation": "4", "page": 3, "content": [319, 427, 246, 20]},
+      {"equation": "5", "page": 3, "content": [319, 314, 244, 20]},
+      {"equation": "6", "page": 3, "content": [358, 109, 207, 20]},
+      {"equation": "7", "page": 4, "content": [319, 84, 246, 23]},
       {"equation": "8", "page": 5, "content": [50, 123, 242, 72]},
-      {"equation": "10", "page": 5, "content": [320, 262, 242, 45]}
+      {"equation": "9", "page": 5, "content": [319, 601, 244, 55]},
+      {"equation": "10", "page": 5, "content": [320, 262, 242, 45]},
+      {"equation": "11", "page": 6, "content": [49, 169, 246, 20], "exclude": [[170, 142]]},
+      {"equation": "12", "page": 6, "content": [49, 134, 247, 18], "exclude": [[170, 178]]},
+      {"equation": "13", "page": 6, "content": [319, 203, 246, 9]},
+      {"equation": "14", "page": 7, "content": [49, 635, 244, 32]},
+      {"equation": "15", "page": 7, "content": [49, 542, 246, 19]}
     ]
   },
   "test10": {
@@ -112,7 +136,7 @@
   "test12": {
     "figures": 11, "equations": 0,
     "regions": [
-      {"caption": "Table I ", "page": 1, "content": [317, 109, 236, 60], "exclude": [[440, 97], [440, 190]]},
+      {"caption": "Table I ", "page": 1, "content": [317, 105, 236, 64], "exclude": [[440, 97], [440, 190]]},
       {"caption": "Figure 1.", "page": 2, "content": [325, 539, 232, 177], "exclude": [[430, 525], [150, 650]]},
       {"caption": "Figure 2.", "page": 3, "content": [335, 632, 200, 86], "exclude": [[430, 619]]},
       {"caption": "Figure 3.", "page": 4, "content": [60, 576, 238, 142], "exclude": [[400, 650], [175, 550]]},

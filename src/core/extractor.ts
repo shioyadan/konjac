@@ -1653,97 +1653,31 @@ function startsLikeSentenceStart(text: string) {
     return /^[("']?\s*[A-Z]/.test(text.trim());
 }
 
-function isUppercaseCaptionContinuation(text: string) {
-    let trimmed = text.trim();
-    return /[A-Z]{2,}/.test(trimmed) &&
-        !/[a-z]/.test(trimmed) &&
-        /^[A-Z0-9 .,&()/§\-]+$/.test(trimmed);
-}
-
-function isTightCaptionBlockContinuation(
-    captionLine: TextLine,
-    prevLine: TextLine,
-    nextLine: TextLine,
-    bodyFontSize: number
-) {
-    if (nextLine.page != captionLine.page || nextLine.y >= prevLine.y) {
-        return false;
-    }
-
-    let xTolerance = Math.max(6, bodyFontSize * 0.8);
-    let sameLeftEdge =
-        Math.abs(nextLine.x - captionLine.x) <= xTolerance ||
-        Math.abs(nextLine.x - prevLine.x) <= xTolerance;
-    let gap = prevLine.y - nextLine.y;
-    let tightLineGap = gap > 0 && gap <= Math.max(12, bodyFontSize * 1.25, captionLine.fontSize * 1.45);
-    let compatibleFont =
-        Math.abs(nextLine.fontSize - prevLine.fontSize) <= 0.8 &&
-        nextLine.fontSize <= captionLine.fontSize + 1.0;
-
-    return sameLeftEdge && tightLineGap && compatibleFont;
-}
-
-function isOpenTableCaptionContinuation(
-    caption: string,
-    captionLine: TextLine,
-    prevLine: TextLine,
-    nextLine: TextLine,
-    bodyFontSize: number,
-    columnWidth: number
-) {
-    let trimmed = nextLine.text.trim();
-    if (
-        captionLooksComplete(caption) ||
-        trimmed.length < 10 ||
-        startsLikeNewBlock(trimmed) ||
-        !isTightCaptionBlockContinuation(captionLine, prevLine, nextLine, bodyFontSize)
-    ) {
-        return false;
-    }
-
-    let proseLike =
-        /[a-z]{3,}/i.test(trimmed) &&
-        /\s/.test(trimmed) &&
-        nextLine.width >= Math.min(90, columnWidth * 0.3);
-    return proseLike && (
-        startsLikeParagraphContinuation(trimmed) ||
-        /[.!?)]/.test(trimmed)
-    );
-}
-
-function isWrappedCaptionContinuation(
-    caption: string,
-    captionLine: TextLine,
-    prevLine: TextLine,
-    nextLine: TextLine,
-    bodyFontSize: number,
-    columnWidth: number
-) {
-    if (
-        nextLine.page != captionLine.page ||
-        isLetteredSectionHeading(nextLine.text) ||
-        startsLikeNewBlock(nextLine.text) ||
-        !isTightCaptionBlockContinuation(captionLine, prevLine, nextLine, bodyFontSize)
-    ) {
-        return false;
-    }
-
-    let trimmed = nextLine.text.trim();
-    if (
-        !captionLooksComplete(caption) ||
-        prevLine.text.endsWith("-") ||
-        endsWithOpenPhrase(caption) ||
-        startsLikeParagraphContinuation(trimmed)
-    ) {
-        return true;
-    }
-
-    let sameLeftEdge = Math.abs(nextLine.x - captionLine.x) <= Math.max(6, bodyFontSize * 0.8);
-    let captionBlockWidth = Math.max(captionLine.width * 1.05, columnWidth * 1.05);
-    return sameLeftEdge &&
-        captionLine.text.length > 40 &&
-        nextLine.width > columnWidth * 0.55 &&
-        nextLine.width <= captionBlockWidth;
+// 継続行の配置を一度だけ調べ、図・表とも同じフォント・行間・整列基準で判断する。
+function continuesCaption(caption: string, first: TextLine, prev: TextLine, next: TextLine,
+    bodyFontSize: number, columnWidth: number) {
+    if (next.page != first.page || next.y >= prev.y || isCaptionLine(next, bodyFontSize, columnWidth) ||
+        isTitleLine(next, bodyFontSize) || isHeadingLine(next, bodyFontSize) || isLetteredSectionHeading(next.text)) return false;
+    let gap = prev.y - next.y, xTolerance = Math.max(6, bodyFontSize * 0.8);
+    let aligned = Math.abs(next.x - first.x) <= xTolerance || Math.abs(next.x - prev.x) <= xTolerance;
+    let tight = aligned && gap <= Math.max(12, bodyFontSize * 1.25, first.fontSize * 1.45) &&
+        Math.abs(next.fontSize - prev.fontSize) <= 0.8 && next.fontSize <= first.fontSize + 1;
+    let loose = Math.abs(next.x - first.x) < columnWidth * 0.6 &&
+        gap <= Math.max(bodyFontSize * 1.8, first.fontSize * 2.2) && next.fontSize <= first.fontSize + 0.8;
+    let complete = captionLooksComplete(caption), hyphen = prev.text.endsWith("-");
+    if (complete && !tight) return false;
+    let text = next.text.trim(), table = isTableCaption(caption);
+    let openTable = table && !complete && tight && text.length >= 10 && !startsLikeNewBlock(text) &&
+        /[a-z]{3,}/i.test(text) && /\s/.test(text) && next.width >= Math.min(90, columnWidth * 0.3) &&
+        (startsLikeParagraphContinuation(text) || /[.!?)]/.test(text));
+    let uppercase = /[A-Z]{2,}/.test(text) && !/[a-z]/.test(text) && /^[A-Z0-9 .,&()/§\-]+$/.test(text);
+    if (table && !(complete && tight) && !openTable && !hyphen && !/^[("']?\s*[a-z]/.test(text) && !uppercase) return false;
+    let wrapped = !table && tight && !startsLikeNewBlock(text) &&
+        (!complete || hyphen || endsWithOpenPhrase(caption) || startsLikeParagraphContinuation(text) ||
+            Math.abs(next.x - first.x) <= xTolerance && first.text.length > 40 && next.width > columnWidth * 0.55 &&
+                next.width <= Math.max(first.width * 1.05, columnWidth * 1.05));
+    return openTable || wrapped || loose && (hyphen ||
+        !(next.fontSize >= bodyFontSize - 0.2 && isParagraphLikeLine(next, bodyFontSize, columnWidth)));
 }
 
 // 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
@@ -2033,41 +1967,6 @@ function isPullQuoteLine(line: TextLine, bodyFontSize: number) {
         /[A-Z]{2,}/.test(text) &&
         !/[a-z]/.test(text) &&
         /^[A-Z0-9 .,&()/§\-]+$/.test(text);
-}
-
-// キャプション継続行は、キャプション先頭と近いフォント・近い位置に出ることが多い。
-// 本文段落や節見出しらしい行に入ったら、キャプションの過剰連結を避けるため止める。
-function isLikelyCaptionContinuationLine(
-    captionLine: TextLine,
-    prevLine: TextLine,
-    nextLine: TextLine,
-    bodyFontSize: number,
-    columnWidth: number
-) {
-    if (nextLine.page != captionLine.page) {
-        return false;
-    }
-
-    if (isLetteredSectionHeading(nextLine.text)) {
-        return false;
-    }
-
-    let sameColumn = Math.abs(nextLine.x - captionLine.x) < columnWidth * 0.6;
-    let closeLineGap = Math.abs(prevLine.y - nextLine.y) <= Math.max(bodyFontSize * 1.8, captionLine.fontSize * 2.2);
-    let compatibleFont = nextLine.fontSize <= captionLine.fontSize + 0.8;
-
-    if (prevLine.text.endsWith("-")) {
-        return sameColumn && closeLineGap && compatibleFont;
-    }
-
-    if (
-        nextLine.fontSize >= bodyFontSize - 0.2 &&
-        isParagraphLikeLine(nextLine, bodyFontSize, columnWidth)
-    ) {
-        return false;
-    }
-
-    return sameColumn && closeLineGap && compatibleFont;
 }
 
 function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
@@ -2752,8 +2651,48 @@ function boundRegionAtText(anchor: PDF_Rect, owner: PDF_Rect, direction: 1 | -1,
     return top > bottom ? {...owner, y: bottom, height: top - bottom} : null;
 }
 
-// 所属範囲の内容を囲む。許容する空白幅は PDF 座標で指定し、セル解像度と分離する。
-function fitRegionContent(mask: OccupancyMask, bounds: PDF_Rect, direction: 1 | -1, bodyFontSize: number, gapLimit: number) {
+// 同じ高さの断片をセルへまとめる。単語間の通常の空白はセル境界にしない。
+function tableTextRows(lines: TextLine[], bodyFontSize: number) {
+    let rows: Array<{y: number; cells: PDF_Rect[]; lines: TextLine[]}> = [];
+    for (let line of [...lines].sort((a, b) => b.y - a.y || a.x - b.x)) {
+        let row = rows[rows.length - 1];
+        if (!row || Math.abs(row.y - line.y) > bodyFontSize * 0.3) {
+            row = {y: line.y, cells: [], lines: []};
+            rows.push(row);
+        }
+        row.lines.push(line);
+    }
+    for (let row of rows) {
+        for (let part of row.lines.flatMap((line) => line.parts).sort((a, b) => a.x - b.x)) {
+            let cell = {page: part.page, x: part.x, y: part.y - part.fontSize * 0.25, width: part.width, height: part.fontSize * 1.25};
+            let last = row.cells[row.cells.length - 1];
+            if (last && cell.x - rectRight(last) < bodyFontSize) row.cells[row.cells.length - 1] = unionRects([last, cell])!;
+            else row.cells.push(cell);
+        }
+    }
+    return rows;
+}
+
+// 2列以上の左端・右端・中央が繰り返しそろう区間だけ、広い行間をつなぐ。
+function tableRowSpans(rows: ReturnType<typeof tableTextRows>, bodyFontSize: number) {
+    let spans: PDF_Rect[] = [];
+    for (let i = 1; i < rows.length; i++) {
+        let a = rows[i - 1], b = rows[i];
+        if (a.y - b.y > bodyFontSize * 4) continue;
+        let cursor = 0, matched = 0;
+        for (let cell of a.cells) {
+            let index = b.cells.findIndex((other, j) => j >= cursor &&
+                Math.min(Math.abs(cell.x - other.x), Math.abs(rectRight(cell) - rectRight(other)),
+                    Math.abs(cell.x + cell.width / 2 - other.x - other.width / 2)) < bodyFontSize * 0.5);
+            if (index >= 0) { matched++; cursor = index + 1; }
+        }
+        if (matched >= 2) spans.push(unionRects([...a.cells, ...b.cells])!);
+    }
+    return spans;
+}
+
+// 所属範囲の内容を囲む。整列を確認した表の行間は空白で打ち切らない。
+function fitRegionContent(mask: OccupancyMask, bounds: PDF_Rect, direction: 1 | -1, bodyFontSize: number, gapLimit: number, spans: PDF_Rect[] = []) {
     let range = maskRectRange(mask, bounds);
     if (!range) return null;
     let x0 = range.x1, x1 = range.x0, y0 = range.y1, y1 = range.y0;
@@ -2767,7 +2706,8 @@ function fitRegionContent(mask: OccupancyMask, bounds: PDF_Rect, direction: 1 | 
             y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1);
             occupied = true;
         }
-        empty = occupied ? 0 : empty + 1;
+        let rowY = mask.y + (y + 0.5) * mask.cellSize;
+        empty = occupied || spans.some((span) => rowY >= span.y && rowY <= rectTop(span)) ? 0 : empty + 1;
         if (y1 > y0 && empty * mask.cellSize > gapLimit) break;
     }
     if (x1 <= x0 || y1 <= y0) return null;
@@ -2820,42 +2760,11 @@ function collectFigureCandidates(
         let captionLines = 1;
         while (captionLines < 20 && endIndex + 1 < lines.length) {
             let next = lines[endIndex + 1];
-            let tableCaption = isTableCaption(caption);
-            let captionComplete = captionLooksComplete(caption);
-            let completedCaptionBlockContinuation =
-                captionComplete &&
-                isTightCaptionBlockContinuation(line, lines[endIndex], next, bodyFontSize);
-            let openTableCaptionContinuation =
-                tableCaption &&
-                isOpenTableCaptionContinuation(caption, line, lines[endIndex], next, bodyFontSize, columnWidth);
-            let wrappedCaptionContinuation =
-                !tableCaption &&
-                isWrappedCaptionContinuation(caption, line, lines[endIndex], next, bodyFontSize, columnWidth);
-            if (captionComplete && !completedCaptionBlockContinuation && !wrappedCaptionContinuation) {
-                break;
-            }
-
-            if (
-                tableCaption &&
-                !completedCaptionBlockContinuation &&
-                !openTableCaptionContinuation &&
-                !caption.endsWith("-") &&
-                !/^[("']?\s*[a-z]/.test(next.text.trim()) &&
-                !isUppercaseCaptionContinuation(next.text)
-            ) {
-                break;
-            }
-
-            if (
-                isCaptionLine(next, bodyFontSize, columnWidth) ||
-                isTitleLine(next, bodyFontSize) ||
-                isHeadingLine(next, bodyFontSize) ||
-                !openTableCaptionContinuation &&
-                    !wrappedCaptionContinuation &&
-                    !isLikelyCaptionContinuationLine(line, lines[endIndex], next, bodyFontSize, columnWidth)
-            ) {
-                break;
-            }
+            if (!continuesCaption(caption, line, lines[endIndex], next, bodyFontSize, columnWidth)) break;
+            // 同じ高さで分かれた複数セルは、説明文ではなく表の先頭行として残す。
+            if (isTableCaption(caption) && tableTextRows(lines.filter((other) => other.page == next.page &&
+                Math.abs(other.y - next.y) < bodyFontSize * 0.3 && other.x >= next.x - 1 &&
+                other.x + other.width <= next.x + columnWidth * 1.1), bodyFontSize)[0]?.cells.length >= 2) break;
 
             caption = appendLineText(caption, next.text);
             endIndex++;
@@ -2908,18 +2817,21 @@ function collectFigureCandidates(
             limits.push(...captions.filter((other) => other !== candidate && isTableCaption(other.node.str) && other.node.rect).map((other) => other.node.rect!));
             let directions: (1 | -1)[] = table ? [-1, 1] : [1];
             let regions = directions.flatMap((direction) => {
-                let bounds = boundRegionAtText(anchor, owner, direction, limits, bodyFontSize * 0.3);
+                let bounds = boundRegionAtText(anchor, owner, direction, limits, table ? 0 : bodyFontSize * 0.3);
                 log?.(`region: caption="${candidate.node.str}" direction=${direction} owner=${fmtRect(owner)} bounds=${fmtRect(bounds)}`);
-                let rect = bounds && fitRegionContent(mask, bounds, direction, bodyFontSize, bodyFontSize * (table ? 0.7 : 4));
+                if (!bounds) return [];
+                let spans = table ? tableRowSpans(tableTextRows(lines.filter((line) => lineCenterInsideRect(line, bounds)), bodyFontSize), bodyFontSize) : [];
+                let rect = fitRegionContent(mask, bounds, direction, bodyFontSize, bodyFontSize * (table ? 0.7 : 4), spans);
                 if (!rect || rect.width < 24 || rect.height < 12) return [];
                 // 上下どちらにも内容がある表は、キャプションに近い長い横罫線を優先する。
                 let ruleGap = Math.min(...pageGraphics.filter((graphic) => graphic.page == metric.page &&
                     graphic.width > owner.width * 0.4 && graphic.height < bodyFontSize * 0.3 &&
                     rectsOverlap(graphic, rect)).map((graphic) => direction > 0
                         ? graphic.y - rectTop(anchor) : anchor.y - rectTop(graphic)));
-                return [{rect, ruleGap: ruleGap < bodyFontSize * 3 ? ruleGap : Infinity}];
+                return [{rect, ruleGap: ruleGap < bodyFontSize * 3 ? ruleGap : Infinity,
+                    alignedRows: spans.filter((span) => rectContainsRect(rect, span, bodyFontSize * 0.3)).length}];
             });
-            regions.sort((a, b) => a.ruleGap - b.ruleGap);
+            regions.sort((a, b) => a.ruleGap - b.ruleGap || b.alignedRows - a.alignedRows);
             candidate.node.rect = regions[0]?.rect;
             log?.(`region: result ${fmtRect(candidate.node.rect ?? null)}`);
         }
@@ -2928,10 +2840,12 @@ function collectFigureCandidates(
     return {figures: candidates, boundaries, masks};
 }
 
-// PDF由来の不可視文字を除き、単独または式本体の行末にある括弧付き番号を探索の起点にする。
-function isEquationNumberLine(line: TextLine) {
+// 式番号は左右どちらの端にも置ける。本文中の括弧付き参照は起点にしない。
+function equationNumberEdge(line: TextLine): "left" | "right" | "either" | null {
     let text = line.text.replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "").trim();
-    return /\(\d+[a-z]?\)$/.test(text);
+    let label = "\\(\\d+(?:\\.\\d+)*[a-z]?\\)";
+    let left = new RegExp(`^${label}`).test(text), right = new RegExp(`${label}$`).test(text);
+    return left && right ? "either" : left ? "left" : right ? "right" : null;
 }
 
 // 等号や主要な演算記号を含む短い行を、表示数式の本体候補として扱う。
@@ -2952,20 +2866,24 @@ function collectEquationCandidates(
     let available = lines.map((line, index) => ({line, index})).filter(({line}) =>
         !blockedLines.has(line) && !excludedRects.some((rect) => lineCenterInsideRect(line, rect))
     );
-    let anchors = available.filter(({line}) => isEquationNumberLine(line) || isDisplayMathLine(line, columnWidth));
+    let anchors = available.flatMap((entry) => {
+        let {line} = entry, edge = equationNumberEdge(line);
+        if (!edge && !isDisplayMathLine(line, columnWidth)) return [];
+        let columns = bodyLayout.columns.filter((column) => column.page == line.page);
+        let distance = (column: BodyColumnModel) => Math.min(
+            edge != "right" ? Math.abs(line.x - column.x) : Infinity,
+            edge != "left" ? Math.abs(line.x + line.width - column.x - columnWidth) : Infinity);
+        let column = columns.filter((column) => edge ? distance(column) < columnWidth * 0.3 :
+            line.x >= column.x - bodyFontSize && line.x + line.width <= column.x + columnWidth + bodyFontSize)
+            .sort((a, b) => distance(a) - distance(b))[0];
+        return column ? [{...entry, column, numbered: edge != null}] : [];
+    });
     // 番号付きのまとまりを先に確定し、その残りから番号なしの独立数式を拾う。
-    anchors.sort((a, b) => Number(isEquationNumberLine(b.line)) - Number(isEquationNumberLine(a.line)));
+    anchors.sort((a, b) => Number(b.numbered) - Number(a.numbered));
     for (let anchor of anchors) {
         if (used.has(anchor.index)) continue;
-        let numbered = isEquationNumberLine(anchor.line);
+        let {numbered, column} = anchor;
         let metric = pageMetrics.get(anchor.line.page)!;
-        let numberRight = anchor.line.x + anchor.line.width;
-        let columns = bodyLayout.columns.filter((column) => column.page == anchor.line.page);
-        let column = columns.filter((column) => numbered
-            ? Math.abs(column.x + columnWidth - numberRight) < columnWidth * 0.3
-            : anchor.line.x >= column.x - bodyFontSize && numberRight <= column.x + columnWidth + bodyFontSize
-        ).sort((a, b) => Math.abs(a.x + columnWidth - numberRight) - Math.abs(b.x + columnWidth - numberRight))[0];
-        if (!column) continue;
         let owner = {page: anchor.line.page, x: column.x - bodyFontSize * 0.6, y: 0,
             width: columnWidth + bodyFontSize * 1.8, height: metric.height};
         let anchorRect = lineRect(anchor.line);
@@ -2975,20 +2893,16 @@ function collectEquationCandidates(
         if (!above || !below) continue;
         let bottom = below.y, top = rectTop(above);
         // 隣の式番号がある場合は、番号間の中間を越えて式を連結しない。
-        for (let other of available) {
-            if (other.index == anchor.index || !isEquationNumberLine(other.line) || other.line.page != owner.page ||
-                Math.abs(other.line.x + other.line.width - (column.x + columnWidth)) > columnWidth * 0.3) continue;
+        for (let other of anchors) {
+            if (other.index == anchor.index || !other.numbered || other.column !== column) continue;
             if (other.line.y > anchor.line.y) top = Math.min(top, (other.line.y + anchor.line.y) / 2);
             if (other.line.y < anchor.line.y) bottom = Math.max(bottom, (other.line.y + anchor.line.y) / 2);
         }
         let bounds = {...owner, y: bottom, height: top - bottom};
         let nearby = available.filter(({line, index}) => !used.has(index) && line.page == bounds.page &&
             line.y >= bottom && line.y <= top && line.x + line.width / 2 >= bounds.x && line.x + line.width / 2 <= rectRight(bounds));
-        let seed = nearby.filter(({line}) => numbered ? isEquationRelationLine(line, columnWidth) : isDisplayMathLine(line, columnWidth))
-            .sort((a, b) => Math.abs(a.line.y - anchor.line.y) - Math.abs(b.line.y - anchor.line.y))[0];
-        if (!seed) continue;
-        let members = new Set([seed.index]);
-        let rect = lineRect(seed.line);
+        let members = new Set([anchor.index]);
+        let rect = lineRect(anchor.line);
         // 接する行を上下とも同じ規則で集める。添字や分数も固定の探索高さに依存しない。
         let changed = true;
         while (changed) {
@@ -3003,8 +2917,13 @@ function collectEquationCandidates(
                 changed = true;
             }
         }
-        if (!members.has(anchor.index)) continue;
         let sourceLines = [...members].map((index) => lines[index]);
+        // 番号だけ、通常の文章、箇条書きを数式画像にしない。記号がなくても式本体は拾う。
+        let content = sourceLines.map((line) => line.text.replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "")
+            .replace(/^\s*\(\d+(?:\.\d+)*[a-z]?\)|\(\d+(?:\.\d+)*[a-z]?\)\s*$/g, "").trim()).filter(Boolean);
+        if (!content.length || (!sourceLines.some((line) => isEquationRelationLine(line, columnWidth)) &&
+            (content.some((text) => !isMathFragment(text) || isListItemStart(text)) ||
+                !content.some((text) => /[\p{Sm}\d]|(?:^|\s)\p{L}(?:\s|$)/u.test(text))))) continue;
         if (!numbered) {
             // 本文中の式や箇条書きの誤検出を避け、字下げと上下の余白がある式だけを採用する。
             if (rect.x < column.x + bodyFontSize * 0.8 || rect.width > columnWidth * 0.95 ||

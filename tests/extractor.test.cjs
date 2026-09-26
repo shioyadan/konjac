@@ -128,6 +128,90 @@ test('zero in a case expression and fraction rules remain inside the equation', 
     assert.ok(right(eq.rect) >= 215 && eq.rect.y <= 645);
 });
 
+test('numbered expressions need no relation symbol and accept either number margin', () => {
+    for (const [x, number] of [[265, '(1)'], [40, '(2.1a)']]) {
+        const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+            text('a + b', 100, 660, 100), text(number, x, 660, 15)]);
+        const [eq] = equations(nodes);
+        assert.equal(equations(nodes).length, 1);
+        assert.ok(eq.str.includes(number) && eq.str.includes('a + b'));
+        assert.ok(encloses(eq.rect, {x: 100, y: 660, width: 100, height: 10}));
+    }
+});
+
+test('numbered fractions and matrices include rows on both sides of the number', () => {
+    const cases = [
+        [text('a', 140, 671, 10, 8), text('b', 140, 650, 10, 8)],
+        [text('[ a b ]', 100, 671, 100), text('[ c d ]', 100, 650, 100)]
+    ];
+    for (const items of cases) {
+        const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540), ...items,
+            text('(1)', 265, 660, 15)], [shape(135, 665, 25, 0.5)]);
+        const [eq] = equations(nodes);
+        assert.ok(eq && eq.str.includes('a') && eq.str.includes('b'));
+        assert.ok(eq.rect.y <= 648 && top(eq.rect) >= 679);
+    }
+});
+
+test('a bare number, short numbered label, and numbered prose are not equations', () => {
+    for (const str of ['', 'Fast path', 'A conventional numbered item explains the experimental setup.']) {
+        const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540), text('(1)', 40, 660, 15),
+            ...(str ? [text(str, 80, 660, str.length > 20 ? 200 : 80)] : [])]);
+        assert.equal(equations(nodes).length, 0, str);
+    }
+});
+
+const tableRow = (y, i, size = 8) => [text(i ? 'M' + i : 'Method', 50, y, 40, size),
+    text(i ? String(i * 12) : 'Latency', 145, y, 40, size), text(i ? String(i * 25) : 'Rate', 240, y, 25, size)];
+
+test('borderless tables keep widely spaced rows and stop before prose', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540), text('Table 1. Measurements.', 40, 690, 230, 9),
+        ...tableRow(650, 0), ...tableRow(626, 1), ...tableRow(602, 2)]);
+    const [table] = figures(nodes);
+    assert.ok(encloses(table.rect, {x: 50, y: 602, width: 215, height: 56}));
+    assert.ok(table.rect.y > 555);
+    assert.ok(nodes.some((node) => node.type === 1 && node.str.includes('Ordinary prose')));
+});
+
+test('right-aligned numeric cells bridge table rows without absorbing a distant note', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 490), text('Table 1. Measurements.', 40, 690, 230, 9),
+        ...tableRow(650, 0), text('M1', 50, 626, 15, 8), text('12', 175, 626, 10, 8), text('1250', 245, 626, 20, 8),
+        text('M2', 50, 602, 15, 8), text('1250', 165, 602, 20, 8), text('3', 260, 602, 5, 8),
+        text('A separate explanatory note.', 50, 560, 150, 8)]);
+    const [table] = figures(nodes);
+    assert.ok(encloses(table.rect, {x: 50, y: 602, width: 215, height: 56}));
+    assert.ok(table.rect.y > 575);
+});
+
+test('cell alignment selects a borderless table above its caption', () => {
+    const chart = shape(55, 430, 210, 100);
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 330),
+        ...tableRow(680, 0), ...tableRow(656, 1), ...tableRow(632, 2),
+        text('Table 1. Measurements.', 40, 605, 230, 9), text('Figure 1. Diagram.', 40, 390, 230, 9)], [chart]);
+    const [table, figure] = figures(nodes);
+    assert.ok(encloses(table.rect, {x: 50, y: 632, width: 215, height: 56}));
+    assert.ok(encloses(figure.rect, chart));
+    assert.ok(table.rect.y > top(figure.rect));
+});
+
+test('a table caption does not absorb its first row of cells', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540), text('Table 1. Measurements.', 40, 690, 230, 9),
+        ...tableRow(678, 0, 9), ...tableRow(654, 1, 9), ...tableRow(630, 2, 9)]);
+    const [table] = figures(nodes);
+    assert.equal(table.str, 'Table 1. Measurements.');
+    assert.ok(encloses(table.rect, {x: 50, y: 630, width: 215, height: 57}));
+});
+
+test('caption wrapping uses layout and stops before a new paragraph', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 340), text('Table 1. Measurements of the', 40, 680, 230, 9),
+        text('experimental setup and its results.', 40, 668, 230, 9), ...tableRow(640, 0), ...tableRow(616, 1),
+        text('Figure 1. Two panels are shown.', 40, 390, 230, 9), text('The upper panel is the baseline.', 40, 378, 230, 9)],
+        [shape(55, 430, 210, 100)]);
+    const [table, figure] = figures(nodes);
+    assert.equal(table.str, 'Table 1. Measurements of the experimental setup and its results.');
+    assert.equal(figure.str, 'Figure 1. Two panels are shown. The upper panel is the baseline.');
+});
+
 test('CropBox translation is applied to both text and drawings', async () => {
     const page = {
         getViewport: () => ({width: 594, height: 774, transform: [1, 0, 0, -1, -36, 810]}),
