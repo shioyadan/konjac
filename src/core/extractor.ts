@@ -6,8 +6,8 @@
 //   2. y 座標と x 座標から TextLine を復元する。
 //   3. 文書全体から本文フォントサイズと本文幅を推定する。
 //   4. ページ番号などの一般的な装飾を落とし、読み順を 2 段組み前提で整える。
-//   5. Figure/Table/Algorithm キャプションから bitmap scan で図表領域を推定し、その領域内の文字行を本文から外す。
-//   6. フォントサイズと文字列パターンから title/heading/figure/equation/text に分類する。
+//   5. 本文・キャプションを境界に図表の所属範囲を決め、マスク上の内容を画像領域にまとめる。
+//   6. 本文・別の式番号を境界に表示数式を集め、残りを title/heading/text に分類する。
 //   7. 連続する本文行を段落にまとめる。
 //   8. 図表をまたいで分割された段落を結合し、HTML タグへ対応づける。
 
@@ -22,7 +22,7 @@ export enum PDF_NodeType {
     CAPTION = 4,
     // Figure/Table を PDF ページから切り出して表示するためのノード。
     FIGURE = 5,
-    // 番号付き数式を PDF ページから切り出して表示するためのノード。
+    // 表示数式を PDF ページから切り出して表示するためのノード。
     EQUATION = 6,
     // 論文タイトル直下から抽出した著者名。
     AUTHOR = 7,
@@ -52,10 +52,19 @@ export interface PDF_GraphicObject extends PDF_Rect {
     strokeWidth?: number;
 }
 
+// 描画済みページの占有画素。左下原点、1セルあたり cellSize PDF ポイント。
+export interface PDF_InkMask {
+    width: number;
+    height: number;
+    cellSize: number;
+    cells: Uint8Array;
+}
+
 // 1 ページ分の入力。既存 API 互換のため unknown[] だけを渡すこともできる。
 export interface PDF_PageInput {
     // PDF.js の getTextContent().items。
     items: unknown[];
+    ink?: PDF_InkMask;
     // PDF.js の getOperatorList() から得た描画オブジェクト。
     graphics?: PDF_GraphicObject[];
     // page.getViewport({scale: 1}).width。未指定なら本文座標から推定する。
@@ -467,20 +476,65 @@ async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Recor
     return graphics;
 }
 
+// Canvas の生成だけを呼び出し側へ委ね、CLI とブラウザで同じマスクを作る。
+export interface PDF_RenderCanvas {
+    width: number;
+    height: number;
+    getContext(contextId: "2d"): CanvasRenderingContext2D | null;
+}
+
+async function renderPageInk(page: any, createCanvas: (width: number, height: number) => PDF_RenderCanvas): Promise<PDF_InkMask> {
+    let viewport = page.getViewport({scale: 1});
+    let canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    let context = canvas.getContext("2d");
+    if (!context) throw new Error("Cannot create a PDF rendering context");
+    await page.render({canvasContext: context, viewport}).promise;
+    let data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let cellSize = OCCUPANCY_CELL_SIZE;
+    let width = Math.ceil(viewport.width / cellSize), height = Math.ceil(viewport.height / cellSize);
+    let cells = new Uint8Array(width * height);
+    // 低解像度へ直接描画すると細線が消えるため、等倍の画素を OR して縮小する。
+    for (let y = 0; y < canvas.height; y++) {
+        let row = Math.max(0, Math.floor((viewport.height - y - 1) / cellSize)) * width;
+        for (let x = 0; x < canvas.width; x++) {
+            let offset = (y * canvas.width + x) * 4;
+            if (Math.min(data[offset], data[offset + 1], data[offset + 2]) < 240) cells[row + Math.floor(x / cellSize)] = 1;
+        }
+    }
+    canvas.width = canvas.height = 0;
+    return {width, height, cellSize, cells};
+}
+
 // CLI/viewer からは TextContent と Graphics を別々に扱わず、ページ入力としてまとめて渡す。
-export async function extractPageInputFromPDFPage(page: any, pageNumber: number, ops: Record<string, number>) {
+export async function extractPageInputFromPDFPage(
+    page: any, pageNumber: number, ops: Record<string, number>,
+    createCanvas?: (width: number, height: number) => PDF_RenderCanvas
+): Promise<PDF_PageInput> {
     let viewport = page.getViewport({scale: 1});
     let [textContent, graphics] = await Promise.all([
         page.getTextContent(),
         extractGraphicsFromPage(page, pageNumber, ops)
     ]);
 
-    return {
-        items: textContent.items,
-        graphics,
+    // CropBox の移動とページ回転を、描画時と同じページ座標へ正規化する。
+    let pageTransform = multiplyMatrix([1, 0, 0, -1, 0, viewport.height], asMatrix(viewport.transform));
+    let input: PDF_PageInput = {
+        items: textContent.items.map((item: PDF_TextItemLike) => item.transform ? {
+            ...item, transform: multiplyMatrix(pageTransform, asMatrix(item.transform))
+        } : item),
+        graphics: graphics.map((graphic) => ({
+            ...graphic,
+            ...transformBox(pageNumber, pageTransform, [graphic.x, graphic.y, rectRight(graphic), rectTop(graphic)], 0, graphic.kind),
+            strokeWidth: graphic.strokeWidth
+        })),
         width: viewport.width,
         height: viewport.height
     };
+    if (createCanvas && hasFullPageImage(input.graphics ?? [], {page: pageNumber, width: viewport.width, height: viewport.height, minX: 0, maxX: viewport.width}) &&
+        buildLinesForPage(input.items, pageNumber).some((line) => isCaptionLine(line))) {
+        input.ink = await renderPageInk(page, createCanvas);
+    }
+    return input;
 }
 
 // PDF.js の transform から文字列、座標、フォントサイズを取り出す。
@@ -750,10 +804,10 @@ function estimatePageMetrics(lines: TextLine[], pages: Array<unknown[] | PDF_Pag
 }
 
 // ページ番号など、論文本体ではない固定要素を落とす。
-function isPageDecoration(line: TextLine) {
+function isPageDecoration(line: TextLine, metric?: PageMetrics) {
     let text = line.text.trim();
     return (
-        /^\d+$/.test(text) && line.fontSize <= 12 ||
+        /^\d+$/.test(text) && line.fontSize <= 12 && (!metric || line.y < 36 || line.y > metric.height - 36) ||
         /Authorized licensed use limited to:|IEEE Xplore\. Restrictions apply\./.test(text) ||
         /^(?:IEEE Micro|Published by the IEEE Computer Society|March\/April \d{4}|COOL CHIPS)(?:\s+|$)/.test(text) ||
         /^0?272-1732\b/.test(text) ||
@@ -1527,7 +1581,7 @@ function startsLikeNewBlock(text: string) {
 }
 
 function isListItemStart(text: string) {
-    return /^(?:•|\d+\.)\s+/.test(text.trim());
+    return /^(?:[•‣❯]|\d+[.)])\s+/.test(text.trim());
 }
 
 function isReferenceEntryStart(text: string) {
@@ -1810,10 +1864,6 @@ function clamp(value: number, minValue: number, maxValue: number) {
     return Math.max(minValue, Math.min(value, maxValue));
 }
 
-function figureCaptionClearY(line: TextLine) {
-    return line.y + line.fontSize + Math.max(2, line.fontSize * 0.25);
-}
-
 function rectRight(rect: PDF_Rect) {
     return rect.x + rect.width;
 }
@@ -1860,73 +1910,12 @@ function intersectRectsLoose(a: PDF_Rect, b: PDF_Rect) {
     return {page: a.page, x, y, width: right - x, height: top - y};
 }
 
-// crop として使える最小サイズを満たす交差領域だけを返す。
-function intersectRects(a: PDF_Rect, b: PDF_Rect) {
-    if (a.page != b.page) {
-        return null;
-    }
-
-    let x = Math.max(a.x, b.x);
-    let y = Math.max(a.y, b.y);
-    let right = Math.min(rectRight(a), rectRight(b));
-    let top = Math.min(rectTop(a), rectTop(b));
-    if (right - x < 24 || top - y < 24) {
-        return null;
-    }
-
-    return {page: a.page, x, y, width: right - x, height: top - y};
-}
-
 function expandRect(rect: PDF_Rect, margin: number, metric: PageMetrics): PDF_Rect {
     let x = clamp(rect.x - margin, 0, metric.width);
     let y = clamp(rect.y - margin, 0, metric.height);
     let right = clamp(rectRight(rect) + margin, x, metric.width);
     let top = clamp(rectTop(rect) + margin, y, metric.height);
     return {...rect, x, y, width: right - x, height: top - y};
-}
-
-function isWideFigureWidth(width: number, columnWidth: number, metric: PageMetrics) {
-    return width > metric.width * 0.48 ||
-        width > columnWidth * 1.25 && width > metric.width * 0.4;
-}
-
-// Figure の最終的な owner 補正に使うため、キャプション位置からカラム内のアンカーだけを作る。
-function captionSearchAnchorRect(captionLine: TextLine, columnWidth: number, metric: PageMetrics) {
-    let pageMargin = 36;
-    let padding = Math.max(6, captionLine.fontSize * 0.8);
-
-    // キャプションがカラム幅を大きく超える場合は、単一カラムではなくページ幅に近い図表とみなす。
-    let isWide = isWideFigureWidth(captionLine.width, columnWidth, metric);
-
-    // 短いキャプションは中央寄せされることがあるため、キャプション左端だけを図の左端とはみなさない。
-    // ただし隣のカラム本文を巻き込まないよう、カラム左端へ寄せる量には上限を置く。
-    let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
-    let rightColumnLeft = Math.max(columnSplit, metric.maxX - columnWidth);
-    let columnLeft = captionLine.x >= columnSplit ? rightColumnLeft : metric.minX;
-    let captionX = Math.max(pageMargin, captionLine.x - 4);
-    let columnX = Math.max(pageMargin, columnLeft - 4);
-    let maxColumnSnap = Math.min(columnWidth * 0.25, 48);
-    let x = isWide
-        ? Math.max(pageMargin, metric.minX - 4)
-        : Math.min(captionX, Math.max(columnX, captionX - maxColumnSnap));
-    // wide 図表は本文領域全体、通常図表は推定カラム幅を基本幅として切り出す。
-    let width = isWide
-        ? Math.min(metric.width - x - pageMargin, Math.max(metric.maxX - x + 4, captionLine.width + padding * 2))
-        : Math.min(metric.width - x - pageMargin, Math.max(columnWidth + padding, captionLine.width + padding * 2));
-
-    x = clamp(x, 0, metric.width);
-    width = clamp(width, 0, metric.width - x);
-    if (width < 24) {
-        return null;
-    }
-
-    return {
-        page: captionLine.page,
-        x,
-        y: 0,
-        width,
-        height: metric.height
-    };
 }
 
 function isParagraphLikeLine(line: TextLine, bodyFontSize: number, columnWidth: number) {
@@ -2029,19 +2018,6 @@ function nearBodyLine(
     );
 }
 
-function isFormulaOnlyLine(line: TextLine, columnWidth: number) {
-    let text = line.text.trim();
-    if (line.width > columnWidth * 0.4) {
-        return false;
-    }
-
-    if (/^[(){}\[\]⌊⌋∑∼=+\-*/,:;\s]+$/.test(text)) {
-        return true;
-    }
-
-    return /^(?:O|P|M|N|k)$/.test(text) && line.width < columnWidth * 0.08;
-}
-
 function isPullQuoteLine(line: TextLine, bodyFontSize: number) {
     let text = line.text.trim();
     if (isHeadingText(text)) {
@@ -2054,20 +2030,6 @@ function isPullQuoteLine(line: TextLine, bodyFontSize: number) {
         /[A-Z]{2,}/.test(text) &&
         !/[a-z]/.test(text) &&
         /^[A-Z0-9 .,&()/§\-]+$/.test(text);
-}
-
-// 本文フォントより小さい行と記号だけの行は、図表ラベルや数式部品として扱う。
-function shouldDropStructuralFragmentLine(line: TextLine, bodyFontSize: number, columnWidth: number, relaxedHeading = false) {
-    if (isPullQuoteLine(line, bodyFontSize)) {
-        return true;
-    }
-
-    if (isCaptionLine(line) || isHeadingLine(line, bodyFontSize, relaxedHeading) || isTitleLine(line, bodyFontSize)) {
-        return false;
-    }
-
-    return line.fontSize < bodyFontSize - 1.2 ||
-        isFormulaOnlyLine(line, columnWidth);
 }
 
 // キャプション継続行は、キャプション先頭と近いフォント・近い位置に出ることが多い。
@@ -2130,25 +2092,6 @@ function hasFullPageImage(graphics: PDF_GraphicObject[], metric: PageMetrics) {
         graphic.width >= metric.width * 0.9 &&
         graphic.height >= metric.height * 0.9
     );
-}
-
-// bitmap scan が実際の境界を決めるため、ここでは caption の上下関係だけでページ内の安全上限を作る。
-function graphicSearchRect(captionLine: TextLine, tableCaption: boolean, metric: PageMetrics) {
-    let pageMargin = 36;
-    let x = pageMargin;
-    let right = metric.width - pageMargin;
-    let y = tableCaption
-        ? pageMargin
-        : captionLine.y + captionLine.fontSize * 0.4;
-    let top = tableCaption
-        ? captionLine.y - captionLine.fontSize * 0.25
-        : metric.height - pageMargin;
-
-    x = clamp(x, pageMargin, metric.width - pageMargin);
-    right = clamp(right, x + 24, metric.width - pageMargin);
-    y = clamp(y, 0, metric.height);
-    top = clamp(top, y + 24, metric.height);
-    return {page: captionLine.page, x, y, width: right - x, height: top - y};
 }
 
 function lineRect(line: TextLine): PDF_Rect {
@@ -2324,11 +2267,11 @@ function lineOccupancyBits(
     if (isCaptionLine(line, bodyFontSize, columnWidth) || isAlgorithmCaptionLine(line)) {
         return MASK_CAPTION;
     }
-    if (isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize)) {
+    if (isHeadingText(line.text)) {
         return MASK_HEADING;
     }
     if (isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth)) {
-        return MASK_BODY | MASK_BODY_LAYOUT;
+        return MASK_BODY;
     }
     if (
         isParagraphLikeLine(line, bodyFontSize, columnWidth) ||
@@ -2397,27 +2340,6 @@ function buildOccupancyMask(
     return mask;
 }
 
-function rowBitCount(mask: OccupancyMask, y: number, x0: number, x1: number, bits: number) {
-    let count = 0;
-    let offset = y * mask.width;
-    for (let x = x0; x < x1; x++) {
-        if ((mask.cells[offset + x] & bits) != 0) {
-            count++;
-        }
-    }
-    return count;
-}
-
-function columnBitCount(mask: OccupancyMask, x: number, y0: number, y1: number, bits: number) {
-    let count = 0;
-    for (let y = y0; y < y1; y++) {
-        if ((mask.cells[y * mask.width + x] & bits) != 0) {
-            count++;
-        }
-    }
-    return count;
-}
-
 function fmtRect(rect: PDF_Rect | null) {
     if (!rect) {
         return "null";
@@ -2435,407 +2357,6 @@ function maskRangeToRect(mask: OccupancyMask, range: MaskRange): PDF_Rect {
     };
 }
 
-function scanVerticalSpanFromCaption(
-    mask: OccupancyMask,
-    range: MaskRange,
-    seedY: number,
-    direction: 1 | -1,
-    targetBits: number,
-    blockerGapLimit: number,
-    gapLimit: number,
-    log?: DebugScanLog
-) {
-    let y = clamp(seedY, range.y0, range.y1 - 1);
-    let emptyGapLimit = Math.max(2, Math.ceil(gapLimit / mask.cellSize));
-    let blockerGapRows = Math.max(2, Math.ceil(blockerGapLimit / mask.cellSize));
-    let separatedGapRows = Math.max(blockerGapRows, Math.ceil(emptyGapLimit * 0.35));
-    let structuralBlockerBits = MASK_CAPTION | MASK_HEADING;
-    let softContentBits = MASK_SHAPE | MASK_FLOAT_TEXT | MASK_OTHER_TEXT | MASK_BODY;
-    let hardBodyRowLimit = Math.max(12, Math.floor((range.x1 - range.x0) * 0.15));
-    let structuralRowLimit = Math.max(10, Math.floor((range.x1 - range.x0) * 0.08));
-    let strongResumeTargetLimit = Math.max(12, Math.floor((range.x1 - range.x0) * 0.45));
-    let seedStructuralToleranceRows = Math.max(3, Math.ceil(12 / mask.cellSize));
-    let firstContent = -1;
-    let lastContent = -1;
-    let emptyRows = 0;
-
-    // caption 側から外側へ進み、空白帯の先で本文や別 caption に当たったら空白の中間を境界にする。
-    log?.(`vertical: seedY=${seedY} clamped=${y} dir=${direction} rows=${range.y0}..${range.y1 - 1} emptyGapLimit=${emptyGapLimit} blockerGapRows=${blockerGapRows} separatedGapRows=${separatedGapRows} hardBodyRowLimit=${hardBodyRowLimit} structuralRowLimit=${structuralRowLimit}`);
-    for (; y >= range.y0 && y < range.y1; y += direction) {
-        let structuralBlockerCount = rowBitCount(mask, y, range.x0, range.x1, structuralBlockerBits);
-        let hardBodyCount = rowBitCount(mask, y, range.x0, range.x1, MASK_BODY_LAYOUT);
-        let blockerCount = structuralBlockerCount + hardBodyCount;
-        let targetCount = rowBitCount(mask, y, range.x0, range.x1, targetBits);
-        let softCount = rowBitCount(mask, y, range.x0, range.x1, softContentBits);
-        let blocked = targetCount == 0 && (
-            structuralBlockerCount > 0 && (emptyRows >= blockerGapRows || structuralBlockerCount >= structuralRowLimit) ||
-            hardBodyCount >= hardBodyRowLimit
-        );
-        if (
-            firstContent < 0 &&
-            blocked &&
-            hardBodyCount == 0 &&
-            structuralBlockerCount > 0 &&
-            Math.abs(y - seedY) <= seedStructuralToleranceRows
-        ) {
-            blocked = false;
-        }
-        let hasTarget = targetCount > 0;
-        let hasSoftContent = softCount > 0 || blockerCount > 0 && !blocked;
-
-        if (firstContent >= 0 && blocked) {
-            if (emptyRows >= blockerGapRows) {
-                log?.(`vertical: y=${y} blocker=${blockerCount} target=${targetCount} soft=${softCount} emptyRows=${emptyRows} -> stop at blocker midpoint`);
-                return spanRangeFromRowsToBlocker(range, firstContent, lastContent, y, direction);
-            }
-            log?.(`vertical: y=${y} blocker=${blockerCount} target=${targetCount} soft=${softCount} -> stop at hard blocker`);
-            return spanRangeFromRows(range, firstContent, lastContent);
-        }
-        if (blockerCount > 0 && (!blocked || hasTarget)) {
-            log?.(`vertical: y=${y} blocker=${blockerCount} target=${targetCount} soft=${softCount} -> ignore overlapping blocker`);
-        }
-
-        if (firstContent < 0) {
-            if (blocked && !hasTarget) {
-                log?.(`vertical: y=${y} blocker=${blockerCount} target=${targetCount} soft=${softCount} -> stop before target`);
-                return null;
-            }
-            log?.(`vertical: y=${y} before-target target=${targetCount} soft=${softCount}`);
-            if (hasTarget) {
-                firstContent = y;
-                lastContent = y;
-                log?.(`vertical: first target row=${y}`);
-            }
-            continue;
-        }
-
-        let currentSpanRows = firstContent < 0 ? 0 : Math.abs(lastContent - firstContent) + 1;
-        let internalResume =
-            emptyRows < separatedGapRows &&
-            currentSpanRows < emptyGapLimit &&
-            targetCount >= strongResumeTargetLimit;
-        // 上下に並ぶパネルは、下段の高さに関係なく短い空白の先まで追う。
-        // パネル端の短いラベルも含めるが、図形から再開する場合は先にも図形が続くことを確認する。
-        // 孤立した横罫線だけでは再開せず、直上にある別の表を巻き込まないようにする。
-        if (
-            !internalResume && direction > 0 && hasTarget &&
-            emptyRows >= blockerGapRows && emptyRows < separatedGapRows
-        ) {
-            if (rowBitCount(mask, y, range.x0, range.x1, MASK_SHAPE) == 0) {
-                internalResume = true;
-            }
-            else {
-                let shapeRows = 0;
-                for (let nextY = y; nextY < Math.min(range.y1, y + separatedGapRows); nextY++) {
-                    if (rowBitCount(mask, nextY, range.x0, range.x1, MASK_HARD_TEXT_BLOCKER) > 0) {
-                        break;
-                    }
-                    if (rowBitCount(mask, nextY, range.x0, range.x1, MASK_SHAPE) > 0) {
-                        shapeRows++;
-                    }
-                }
-                internalResume = shapeRows >= Math.max(4, blockerGapRows * 2);
-            }
-            if (internalResume) {
-                log?.(`vertical: y=${y} emptyRows=${emptyRows} -> resume stacked figure content`);
-            }
-        }
-        if ((hasTarget || hasSoftContent) && emptyRows >= blockerGapRows && !internalResume) {
-            log?.(`vertical: y=${y} target=${targetCount} soft=${softCount} emptyRows=${emptyRows} -> stop before separated content`);
-            return spanRangeFromRowsToBlocker(range, firstContent, lastContent, y, direction);
-        }
-        if (hasTarget || hasSoftContent) {
-            lastContent = y;
-            emptyRows = 0;
-            log?.(`vertical: y=${y} content target=${targetCount} soft=${softCount} -> extend`);
-        }
-        else if (++emptyRows >= emptyGapLimit) {
-            log?.(`vertical: y=${y} emptyRows=${emptyRows} -> horizontal whitespace boundary`);
-            return spanRangeFromRows(range, firstContent, lastContent);
-        }
-        else {
-            log?.(`vertical: y=${y} emptyRows=${emptyRows}`);
-        }
-    }
-
-    log?.(`vertical: reached search edge first=${firstContent} last=${lastContent}`);
-    return firstContent < 0 ? null : spanRangeFromRows(range, firstContent, lastContent);
-}
-
-function seedVerticalScanRange(mask: OccupancyMask, range: MaskRange, seedX: number, bodyFontSize: number, columnWidth: number, log?: DebugScanLog) {
-    let rangeWidth = range.x1 - range.x0;
-    let minFigureWidth = Math.max(160, Math.min(columnWidth * 0.85, bodyFontSize * 18.0));
-    let bandWidth = Math.min(rangeWidth, Math.max(4, Math.ceil(minFigureWidth / mask.cellSize)));
-    let centerX = clamp(Math.floor((seedX - mask.x) / mask.cellSize), range.x0, range.x1 - 1);
-    let x0 = clamp(centerX - Math.floor(bandWidth / 2), range.x0, range.x1 - bandWidth);
-
-    // 縦方向の blocker 判定は、caption 直上/直下の最低幅だけを見る。
-    // 反対カラムの本文で止まることを避け、実際の図幅は後続の左右スキャンで bitmap から決める。
-    let seedRange = {...range, x0, x1: x0 + bandWidth};
-    log?.(`scan: seed vertical band x=${seedRange.x0}..${seedRange.x1 - 1} minWidth=${minFigureWidth.toFixed(1)}`);
-    return seedRange;
-}
-
-function spanRangeFromRows(range: MaskRange, a: number, b: number) {
-    let y0 = Math.max(range.y0, Math.min(a, b));
-    let y1 = Math.min(range.y1, Math.max(a, b) + 1);
-    return {...range, y0, y1};
-}
-
-function spanRangeFromRowsToBlocker(range: MaskRange, first: number, last: number, blocker: number, direction: 1 | -1) {
-    let span = spanRangeFromRows(range, first, last);
-    if (direction > 0) {
-        let y1 = clamp(Math.ceil((Math.max(first, last) + blocker + 1) / 2), span.y1, range.y1);
-        return {...span, y1};
-    }
-
-    let y0 = clamp(Math.floor((Math.min(first, last) + blocker + 1) / 2), range.y0, span.y0);
-    return {...span, y0};
-}
-
-function targetColumnSpan(mask: OccupancyMask, range: MaskRange, bits: number) {
-    let minX = range.x1;
-    let maxX = range.x0 - 1;
-    for (let y = range.y0; y < range.y1; y++) {
-        let offset = y * mask.width;
-        for (let x = range.x0; x < range.x1; x++) {
-            if ((mask.cells[offset + x] & bits) != 0) {
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-            }
-        }
-    }
-
-    return maxX < minX ? null : {x0: minX, x1: maxX + 1};
-}
-
-function findSeedTargetCell(
-    mask: OccupancyMask,
-    range: MaskRange,
-    seedX: number,
-    seedY: number,
-    direction: 1 | -1,
-    bits: number,
-    bodyFontSize: number
-) {
-    let centerX = clamp(Math.floor((seedX - mask.x) / mask.cellSize), range.x0, range.x1 - 1);
-    let yStart = clamp(seedY, range.y0, range.y1 - 1);
-    let halfBand = Math.max(4, Math.ceil(Math.max(14, bodyFontSize * 1.4) / mask.cellSize));
-    let minSeedWidth = Math.max(3, Math.ceil(Math.max(5, bodyFontSize * 0.5) / mask.cellSize));
-
-    // caption 中央の細い 1 列ではなく、最低幅を持つ縦帯で最初の図表行を探す。
-    // 点状ノイズやラベル 1 文字だけを seed にしないため、同じ行で数セル以上の target を要求する。
-    for (let y = yStart; y >= range.y0 && y < range.y1; y += direction) {
-        let x0 = clamp(centerX - halfBand, range.x0, range.x1);
-        let x1 = clamp(centerX + halfBand + 1, x0, range.x1);
-        let span = targetColumnSpan(mask, {x0, x1, y0: y, y1: y + 1}, bits);
-        if (span && span.x1 - span.x0 >= minSeedWidth) {
-            return {x: Math.floor((span.x0 + span.x1) / 2), y};
-        }
-    }
-
-    // 細線だけで構成された図表もあるため、帯で見つからない場合だけ従来の近傍探索に戻す。
-    let radiusLimit = Math.max(3, Math.ceil(24 / mask.cellSize));
-    for (let y = yStart; y >= range.y0 && y < range.y1; y += direction) {
-        for (let r = 0; r <= radiusLimit; r++) {
-            let x0 = Math.max(range.x0, centerX - r);
-            let x1 = Math.min(range.x1 - 1, centerX + r);
-            if ((mask.cells[y * mask.width + x0] & bits) != 0) {
-                return {x: x0, y};
-            }
-            if (x1 != x0 && (mask.cells[y * mask.width + x1] & bits) != 0) {
-                return {x: x1, y};
-            }
-        }
-    }
-
-    return null;
-}
-
-function scanTargetColumnSpanFromSeed(
-    mask: OccupancyMask,
-    range: MaskRange,
-    seedX: number,
-    seedY: number,
-    direction: 1 | -1,
-    seedBits: number,
-    scanBits: number,
-    bodyFontSize: number,
-    log?: DebugScanLog
-) {
-    let seed = findSeedTargetCell(mask, range, seedX, seedY, direction, seedBits, bodyFontSize);
-    if (!seed) {
-        log?.("scan: no seed target cell");
-        return null;
-    }
-
-    let seedCell = seed;
-    let emptyBand = Math.max(4, Math.ceil(Math.max(16, bodyFontSize * 1.6) / mask.cellSize));
-    let supportY0 = range.y0;
-    let supportY1 = range.y1;
-
-    // 縦スキャンで得た高さ全体を使って seed から左右へ伸ばす。
-    // searchRect 全幅の min/max ではなく、caption 近傍から到達できる bitmap 上の owner span を取る。
-    function scanEdge(step: -1 | 1) {
-        let lastContent = seedCell.x;
-        let emptyRun = 0;
-
-        for (let x = seedCell.x; x >= range.x0 && x < range.x1; x += step) {
-            if (columnBitCount(mask, x, supportY0, supportY1, scanBits) > 0) {
-                lastContent = x;
-                emptyRun = 0;
-                continue;
-            }
-
-            if (x != seedCell.x && columnBitCount(mask, x, range.y0, range.y1, MASK_HARD_TEXT_BLOCKER) > 0) {
-                log?.(`scan: seed ${step < 0 ? "left" : "right"} stopped by blocker x=${x}`);
-                break;
-            }
-
-            if (++emptyRun >= emptyBand) {
-                log?.(`scan: seed ${step < 0 ? "left" : "right"} stopped by whitespace x=${x - (emptyBand - 1) * step}..${x}`);
-                break;
-            }
-        }
-
-        return step < 0 ? lastContent : lastContent + 1;
-    }
-
-    let x0 = scanEdge(-1);
-    let x1 = scanEdge(1);
-    log?.(`scan: seed target cell x=${seedCell.x} y=${seedCell.y} supportY=${supportY0}..${supportY1 - 1} scanned x=${x0}..${x1 - 1}`);
-    return {x0, x1};
-}
-
-function whitespaceOrBlockerIndex(
-    mask: OccupancyMask,
-    edge: number,
-    limit: number,
-    y0: number,
-    y1: number,
-    padding: number,
-    minBand: number,
-    step: -1 | 1,
-    log?: DebugScanLog
-) {
-    let blockerBits = MASK_HARD_TEXT_BLOCKER;
-    let runStart = -1;
-    let runEnd = -1;
-    let label = step < 0 ? "left" : "right";
-    let x = step < 0 ? edge - 1 : edge;
-    let inRange = (value: number) => step < 0 ? value >= limit : value < limit;
-    for (; inRange(x); x += step) {
-        if (columnBitCount(mask, x, y0, y1, blockerBits) > 0) {
-            let boundary = step < 0 ? Math.min(edge, x + 1) : Math.max(edge, x);
-            log?.(`horizontal-${label}: blocker at x=${x}, boundary=${boundary}`);
-            return boundary;
-        }
-
-        if (!columnMostlyEmpty(mask, x, y0, y1)) {
-            runStart = -1;
-            runEnd = -1;
-            continue;
-        }
-
-        if (runStart < 0) {
-            runStart = x;
-            runEnd = x;
-        }
-        else {
-            runStart = Math.min(runStart, x);
-            runEnd = Math.max(runEnd, x);
-        }
-        if (runEnd - runStart + 1 >= minBand) {
-            let inset = Math.ceil(minBand * 0.35);
-            let boundary = step < 0
-                ? clamp(runEnd + 1 - padding, runStart + inset, runEnd + 1)
-                : clamp(runStart + padding, runStart, runEnd + 1 - inset);
-            log?.(`horizontal-${label}: whitespace band x=${runStart}..${runEnd}, boundary=${boundary}`);
-            return boundary;
-        }
-    }
-
-    let boundary = step < 0 ? Math.max(limit, edge - padding) : Math.min(limit, edge + padding);
-    log?.(`horizontal-${label}: reached limit=${limit}, boundary=${boundary}`);
-    return boundary;
-}
-
-function scanRectFromCaptionWhitespace(
-    mask: OccupancyMask,
-    searchRect: PDF_Rect,
-    seedY: number,
-    seedX: number,
-    direction: 1 | -1,
-    targetBits: number,
-    bodyFontSize: number,
-    columnWidth: number,
-    verticalGapLimit: number,
-    log?: DebugScanLog,
-    separatedContentGapLimit?: number
-) {
-    let range = maskRectRange(mask, searchRect);
-    if (!range) {
-        log?.(`scan: searchRect outside mask ${fmtRect(searchRect)}`);
-        return null;
-    }
-
-    log?.(`scan: start search=${fmtRect(searchRect)} cellRange x=${range.x0}..${range.x1 - 1} y=${range.y0}..${range.y1 - 1}`);
-    let blockerGapLimit = separatedContentGapLimit ?? Math.max(5, bodyFontSize * 0.6);
-    let seedRange = seedVerticalScanRange(mask, range, seedX, bodyFontSize, columnWidth, log);
-    let seedVertical = scanVerticalSpanFromCaption(mask, seedRange, seedY, direction, targetBits, blockerGapLimit, verticalGapLimit, log);
-    if (!seedVertical) {
-        log?.("scan: no vertical span");
-        return null;
-    }
-    let vertical = {...range, y0: seedVertical.y0, y1: seedVertical.y1};
-    log?.(`scan: vertical span x=${vertical.x0}..${vertical.x1 - 1} y=${vertical.y0}..${vertical.y1 - 1}`);
-
-    let scanBits = targetBits | MASK_OTHER_TEXT;
-    let xSpan = targetColumnSpan(mask, vertical, scanBits);
-    if (!xSpan) {
-        log?.("scan: no target columns inside vertical span");
-        return null;
-    }
-    let seedRatio = (seedX - searchRect.x) / searchRect.width;
-    let globalWidth = xSpan.x1 - xSpan.x0;
-    let wideAmbiguousTarget =
-        direction > 0 &&
-        searchRect.width >= 360 &&
-        globalWidth >= (range.x1 - range.x0) * 0.65 &&
-        (seedRatio < 0.38 || seedRatio > 0.62);
-    let ownerSpanNeeded =
-        wideAmbiguousTarget ||
-        direction < 0 && (
-            globalWidth >= (range.x1 - range.x0) * 0.6 ||
-            globalWidth * mask.cellSize >= columnWidth * 1.25
-        );
-    let ownerSpanUsed = false;
-    if (ownerSpanNeeded) {
-        let seededSpan = scanTargetColumnSpanFromSeed(mask, vertical, seedX, seedY, direction, targetBits, scanBits, bodyFontSize, log);
-        if (seededSpan) {
-            log?.(`scan: replace global target columns x=${xSpan.x0}..${xSpan.x1 - 1} with owner x=${seededSpan.x0}..${seededSpan.x1 - 1}`);
-            xSpan = seededSpan;
-            ownerSpanUsed = true;
-        }
-    }
-    log?.(`scan: target columns x=${xSpan.x0}..${xSpan.x1 - 1}`);
-
-    let padding = Math.max(1, Math.ceil(Math.max(4, bodyFontSize * 0.45) / mask.cellSize));
-    // 図内の列間・パネル間の細い縦空白で切らないよう、外側境界とみなす空白帯は広めに要求する。
-    // 本文などの hard blocker に当たった場合は、この幅を満たさなくても手前で止まる。
-    let minBand = Math.max(2, Math.ceil(Math.max(40, Math.min(searchRect.width, 280) * 0.16, bodyFontSize * 4.0) / mask.cellSize));
-    if (ownerSpanUsed) {
-        minBand = Math.min(minBand, Math.max(4, Math.ceil(Math.max(16, bodyFontSize * 1.6) / mask.cellSize)));
-    }
-    log?.(`scan: horizontal padding=${padding} minBand=${minBand}`);
-    let x0 = whitespaceOrBlockerIndex(mask, xSpan.x0, vertical.x0, vertical.y0, vertical.y1, padding, minBand, -1, log);
-    let x1 = whitespaceOrBlockerIndex(mask, xSpan.x1, vertical.x1, vertical.y0, vertical.y1, padding, minBand, 1, log);
-    let rect = maskRangeToRect(mask, {...vertical, x0, x1});
-    let result = intersectRectsLoose(rect, searchRect);
-    log?.(`scan: result ${fmtRect(result)}`);
-    return result;
-}
-
 function scanLoggerForCaption(options: PDF_ExtractOptions | undefined, caption: string): DebugScanLog | undefined {
     if (!options?.debugScanSink) {
         return undefined;
@@ -2847,76 +2368,6 @@ function scanLoggerForCaption(options: PDF_ExtractOptions | undefined, caption: 
     }
 
     return (message) => options.debugScanSink?.(`[scan] ${message}`);
-}
-
-// Figure の横幅は caption/seed が属するカラムを優先する。
-// bitmap が隣のカラムや枠全体まで広がった場合は、空白帯・本文 blocker・ページ中央で所有範囲へ戻す。
-function fitFigureToCaptionHorizontalOwner(
-    rect: PDF_Rect,
-    seedRect: PDF_Rect,
-    captionLine: TextLine,
-    mask: OccupancyMask,
-    bodyFontSize: number,
-    metric: PageMetrics,
-    log?: DebugScanLog
-) {
-    let range = maskRectRange(mask, rect);
-    if (!range) {
-        return rect;
-    }
-
-    let columnSplit = Math.max(metric.width / 2, (metric.minX + metric.maxX) / 2);
-    let captionCenter = captionLine.x + captionLine.width / 2;
-    let ownedRect = rect;
-    let padding = Math.max(1, Math.ceil(Math.max(2, bodyFontSize * 0.25) / mask.cellSize));
-    let minBand = Math.max(2, Math.ceil(Math.max(3, bodyFontSize * 0.35) / mask.cellSize));
-
-    if (captionCenter > columnSplit + 12 && seedRect.x > rect.x + minBand * mask.cellSize) {
-        let ownedLeft = clamp(Math.floor((seedRect.x - mask.x) / mask.cellSize), range.x0 + 1, range.x1 - 1);
-        let x0 = whitespaceOrBlockerIndex(mask, ownedLeft, range.x0, range.y0, range.y1, padding, minBand, -1, log);
-        let newX = mask.x + x0 * mask.cellSize;
-        if (newX > rect.x + mask.cellSize) {
-            log?.(`figure: trimmed left intrusion x=${rect.x.toFixed(1)} -> ${newX.toFixed(1)}`);
-            ownedRect = {...rect, x: newX, width: rectRight(rect) - newX};
-        }
-    }
-
-    if (captionCenter < columnSplit - 12 && rectRight(seedRect) < rectRight(ownedRect) - minBand * mask.cellSize) {
-        let ownedRight = clamp(Math.ceil((rectRight(seedRect) - mask.x) / mask.cellSize), range.x0 + 1, range.x1 - 1);
-        let x1 = whitespaceOrBlockerIndex(mask, ownedRight, range.x1, range.y0, range.y1, padding, minBand, 1, log);
-        let newRight = mask.x + x1 * mask.cellSize;
-        if (newRight < rectRight(ownedRect) - mask.cellSize) {
-            log?.(`figure: trimmed right intrusion right=${rectRight(ownedRect).toFixed(1)} -> ${newRight.toFixed(1)}`);
-            ownedRect = {...ownedRect, width: newRight - ownedRect.x};
-        }
-    }
-
-    if (ownedRect.width > metric.width * 0.75) {
-        return ownedRect;
-    }
-
-    let pageCenter = metric.width / 2;
-    if (captionCenter < pageCenter - 40 && rectRight(ownedRect) > pageCenter + 8) {
-        let right = pageCenter + 8;
-        return {...ownedRect, width: right - ownedRect.x};
-    }
-
-    if (captionCenter > pageCenter + 40 && ownedRect.x < pageCenter - 24) {
-        let x = pageCenter - 24;
-        return {...ownedRect, x, width: rectRight(ownedRect) - x};
-    }
-
-    return ownedRect;
-}
-
-function columnMostlyEmpty(mask: OccupancyMask, x: number, y0: number, y1: number) {
-    let occupied = 0;
-    for (let y = y0; y < y1; y++) {
-        if ((mask.cells[y * mask.width + x] & MASK_CONTENT) != 0) {
-            occupied++;
-        }
-    }
-    return occupied <= Math.max(1, Math.floor((y1 - y0) * 0.02));
 }
 
 function colorToSVG(color: [number, number, number]) {
@@ -3088,15 +2539,17 @@ function emitDebugMasks(
     figures: FigureCandidate[],
     bodyFontSize: number,
     columnWidth: number,
-    bodyLayout: BodyLayoutModel
+    bodyLayout: BodyLayoutModel,
+    masks: Map<number, OccupancyMask>
 ) {
     if (!options?.debugMaskSink) {
         return;
     }
 
     for (let metric of pageMetrics.values()) {
-        let pageRect = {page: metric.page, x: 0, y: 0, width: metric.width, height: metric.height};
-        let mask = buildOccupancyMask(pageRect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
+        let original = masks.get(metric.page);
+        if (!original) continue;
+        let mask = {...original, cells: original.cells.slice()};
         for (let figure of figures) {
             if (figure.node.rect?.page == metric.page) {
                 drawRectOutlineToMask(mask, figure.node.rect, MASK_CROP);
@@ -3104,359 +2557,6 @@ function emitDebugMasks(
         }
         options.debugMaskSink(occupancyMaskToSVG(mask, metric, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout));
     }
-}
-
-function padFigureBottomTowardCaption(rect: PDF_Rect, captionLine: TextLine, bodyFontSize: number) {
-    let bottomLimit = figureCaptionClearY(captionLine);
-    let y = Math.max(bottomLimit, rect.y - Math.max(8, bodyFontSize * 1.4));
-    return {...rect, y, height: rectTop(rect) - y};
-}
-
-function trimTableRectAtTextGap(
-    rect: PDF_Rect,
-    captionLines: TextLine[],
-    lines: TextLine[],
-    bodyFontSize: number,
-    log?: DebugScanLog
-) {
-    let captionEndLine = captionLines[captionLines.length - 1] ?? captionLines[0];
-    if (!captionEndLine) {
-        return rect;
-    }
-
-    let tableLines = lines
-        .filter((line) =>
-            line.page == rect.page &&
-            line.y < captionEndLine.y &&
-            line.y >= rect.y &&
-            lineCenterHorizontallyInsideRect(line, rect, Math.max(4, bodyFontSize * 0.5)) &&
-            !isPageDecoration(line)
-        )
-        .sort((a, b) => b.y - a.y);
-    if (tableLines.length < 3) {
-        return rect;
-    }
-
-    let gapLimit = Math.max(18, bodyFontSize * 2.0);
-    let prev = tableLines[0];
-    let tableLineCount = 1;
-    for (let i = 1; i < tableLines.length; i++) {
-        let line = tableLines[i];
-        let gap = prev.y - line.y;
-        let separateSmallFloatText = line.fontSize < bodyFontSize - 1.5;
-        if (tableLineCount >= 2 && gap > gapLimit && (separateSmallFloatText || gap > gapLimit * 1.25)) {
-            let y = lineRect(prev).y - Math.max(4, bodyFontSize * 0.6);
-            let trimmedY = clamp(y, rect.y, rectTop(rect) - 24);
-            if (trimmedY > rect.y + Math.max(bodyFontSize, 8)) {
-                log?.(`table: text-gap trim y=${rect.y.toFixed(1)} -> ${trimmedY.toFixed(1)} gap=${gap.toFixed(1)} next="${line.text}"`);
-                return {...rect, y: trimmedY, height: rectTop(rect) - trimmedY};
-            }
-            return rect;
-        }
-
-        prev = line;
-        tableLineCount++;
-    }
-
-    return rect;
-}
-
-function fitTableRectByBitmap(
-    captionLines: TextLine[],
-    lines: TextLine[],
-    relaxedTableScan: boolean,
-    pageMask: OccupancyMask,
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    log?: DebugScanLog
-) {
-    let captionLine = captionLines[0];
-    let captionEndLine = captionLines[captionLines.length - 1] ?? captionLine;
-    let rawSearchRect = graphicSearchRect(captionLine, true, metric);
-    let captionBottom = captionEndLine.y - captionEndLine.fontSize * 0.3;
-    let searchTop = clamp(captionBottom, rawSearchRect.y + 24, rectTop(rawSearchRect));
-    let searchRect = {...rawSearchRect, height: searchTop - rawSearchRect.y};
-    let seedY = Math.floor((captionBottom - pageMask.y) / pageMask.cellSize) - 1;
-    let seedX = captionLine.x + captionLine.width / 2;
-    let separatedContentGapLimit = relaxedTableScan
-        ? Math.max(bodyFontSize * 1.4, 12)
-        : undefined;
-    let fitted = scanRectFromCaptionWhitespace(
-        pageMask,
-        searchRect,
-        seedY,
-        seedX,
-        -1,
-        MASK_SHAPE | MASK_FLOAT_TEXT,
-        bodyFontSize,
-        columnWidth,
-        Math.max(bodyFontSize * 2.8, 26),
-        log,
-        separatedContentGapLimit
-    );
-
-    if (!fitted || rectArea(fitted) < 120) {
-        log?.(`table: scan too small ${fmtRect(fitted)}`);
-        return null;
-    }
-
-    log?.(`table: scan result ${fmtRect(fitted)}`);
-    let finalRect = intersectRects(fitted, searchRect);
-    if (!finalRect || finalRect.width < 24 || finalRect.height < 24) {
-        log?.(`table: invalid final ${fmtRect(finalRect)}`);
-        return null;
-    }
-    if (relaxedTableScan) {
-        finalRect = trimTableRectAtTextGap(finalRect, captionLines, lines, bodyFontSize, log);
-    }
-    log?.(`table: final candidate ${fmtRect(finalRect)}`);
-
-    return finalRect;
-}
-
-// OCR付き全面画像では図形の描画命令を得られないため、本文・見出しとの境界から図表領域を補う。
-function estimateRasterFigureRect(
-    captionLines: TextLine[],
-    tableCaption: boolean,
-    lines: TextLine[],
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    bodyLayout: BodyLayoutModel,
-    log?: DebugScanLog
-) {
-    let captionLine = captionLines[0];
-    let captionEndLine = captionLines[captionLines.length - 1] ?? captionLine;
-    let centerX = captionLine.x + captionLine.width / 2;
-    let wideTable = tableCaption && Math.abs(centerX - metric.width / 2) < columnWidth * 0.18;
-    let pageColumns = bodyLayout.columns
-        .filter((column) => column.page == captionLine.page)
-        .sort((a, b) => a.x - b.x);
-    let owner: PDF_Rect;
-
-    if (wideTable) {
-        let x = Math.max(36, metric.minX - 6);
-        let right = Math.min(metric.width - 36, metric.maxX + 6);
-        owner = {page: captionLine.page, x, y: 0, width: right - x, height: metric.height};
-    }
-    else {
-        let rightColumn = centerX >= metric.width / 2;
-        let column = rightColumn ? pageColumns[pageColumns.length - 1] : pageColumns[0];
-        let anchor = captionSearchAnchorRect(captionLine, columnWidth, metric);
-        let x = column ? Math.max(36, column.x - 6) : anchor?.x ?? Math.max(36, captionLine.x - 6);
-        let width = Math.min(metric.width - 36 - x, Math.max(columnWidth + 12, anchor?.width ?? 0));
-        owner = {page: captionLine.page, x, y: 0, width, height: metric.height};
-    }
-
-    let blockers = lines.filter((line) =>
-        line.page == captionLine.page &&
-        !captionLines.includes(line) &&
-        lineCenterHorizontallyInsideRect(line, owner, Math.max(4, bodyFontSize * 0.5)) &&
-        (
-            isHeadingLine(line, bodyFontSize, true) ||
-            isCaptionLine(line, bodyFontSize, columnWidth) ||
-            isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) &&
-                isBodySizedProseFragment(line, bodyFontSize)
-        )
-    );
-    let padding = Math.max(6, bodyFontSize * 0.7);
-
-    if (tableCaption) {
-        let top = lineRect(captionEndLine).y - padding * 0.5;
-        let nextBlocker = blockers
-            .filter((line) => line.y < captionEndLine.y)
-            .sort((a, b) => b.y - a.y)[0];
-        let y = nextBlocker
-            ? rectTop(lineRect(nextBlocker)) + padding
-            : 36;
-        if (top - y < Math.max(36, bodyFontSize * 4)) {
-            return null;
-        }
-        let rect = {...owner, y, height: top - y};
-        rect = trimTableRectAtTextGap(rect, captionLines, lines, bodyFontSize, log);
-        let footnote = lines
-            .filter((line) =>
-                line.page == rect.page &&
-                line.y < captionEndLine.y &&
-                line.fontSize < bodyFontSize - 1 &&
-                /^[*†‡]/.test(line.text.trim()) &&
-                lineCenterHorizontallyInsideRect(line, rect, 0)
-            )
-            .sort((a, b) => b.y - a.y)[0];
-        if (footnote) {
-            let trimmedY = Math.min(rectTop(rect) - 36, rectTop(lineRect(footnote)) + padding);
-            if (trimmedY > rect.y) {
-                rect = {...rect, y: trimmedY, height: rectTop(rect) - trimmedY};
-            }
-        }
-        log?.(`raster table fallback: ${fmtRect(rect)}`);
-        return rect;
-    }
-
-    let y = figureCaptionClearY(captionLine);
-    let previousBlocker = blockers
-        .filter((line) => line.y > captionLine.y)
-        .sort((a, b) => a.y - b.y)[0];
-    let top = previousBlocker
-        ? lineRect(previousBlocker).y - padding
-        : metric.height - 36;
-    if (top - y < Math.max(36, bodyFontSize * 4)) {
-        return null;
-    }
-    let rect = {...owner, y, height: top - y};
-    log?.(`raster figure fallback: ${fmtRect(rect)}`);
-    return rect;
-}
-
-// Figure はキャプション側から bitmap を走査し、水平・垂直の空白帯を図の外側境界として切る。
-// 本文・見出し・別キャプションに当たった場合は、その手前の安全な範囲へ戻す。
-function fitRectByCaptionSearch(
-    anchorRect: PDF_Rect,
-    captionLine: TextLine,
-    pageMask: OccupancyMask,
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    log?: DebugScanLog
-) {
-    let rawSearchRect = graphicSearchRect(captionLine, false, metric);
-    log?.(`figure: raw search ${fmtRect(rawSearchRect)}`);
-    let searchRect = rawSearchRect;
-    log?.(`figure: scan search ${fmtRect(searchRect)}`);
-    let seedY = Math.ceil((figureCaptionClearY(captionLine) - pageMask.y) / pageMask.cellSize);
-    let seedX = captionLine.x + captionLine.width / 2;
-    let fitted = scanRectFromCaptionWhitespace(
-        pageMask,
-        searchRect,
-        seedY,
-        seedX,
-        1,
-        MASK_SHAPE | MASK_FLOAT_TEXT,
-        bodyFontSize,
-        columnWidth,
-        Math.max(bodyFontSize * 7.0, 64),
-        log
-    );
-
-    if (!fitted || rectArea(fitted) < 120) {
-        return null;
-    }
-
-    let finalRect = intersectRects(fitted, searchRect);
-    if (!finalRect) {
-        return null;
-    }
-    finalRect = fitFigureToCaptionHorizontalOwner(finalRect, anchorRect, captionLine, pageMask, bodyFontSize, metric, log);
-    return finalRect;
-}
-
-function findSeparatorBelowCaption(rect: PDF_Rect, mask: OccupancyMask, searchTop: number, bodyFontSize: number, log?: DebugScanLog) {
-    let depth = Math.max(36, bodyFontSize * 5);
-    let searchRect = {
-        page: rect.page,
-        x: rect.x,
-        y: Math.max(rect.y, searchTop - depth),
-        width: rect.width,
-        height: Math.min(depth, searchTop - rect.y)
-    };
-    let range = maskRectRange(mask, searchRect);
-    if (!range) {
-        return null;
-    }
-
-    // 枠付きの図グリッドでは、前の caption と現在の図の間に水平罫線が入ることがある。
-    // その罫線を見つけられれば、caption 文字の実描画位置に依存せず安全に上端を切れる。
-    let minShape = Math.max(12, Math.floor((range.x1 - range.x0) * 0.7));
-    for (let y = range.y1 - 1; y >= range.y0; y--) {
-        if (rowBitCount(mask, y, range.x0, range.x1, MASK_SHAPE) >= minShape) {
-            let top = mask.y + y * mask.cellSize - Math.max(2, bodyFontSize * 0.3);
-            log?.(`figure: previous caption separator y=${(mask.y + y * mask.cellSize).toFixed(1)} -> top=${top.toFixed(1)}`);
-            return top;
-        }
-    }
-
-    return null;
-}
-
-// Figure が縦に続くページでは、現在の Figure の上側候補に直前 Figure のキャプションが入ることがある。
-// 候補内に別のキャプションを見つけたら、その直下で上端を切り、前の図を巻き込まないようにする。
-function trimFigureRectAtPreviousCaption(rect: PDF_Rect, lines: TextLine[], mask: OccupancyMask, bodyFontSize: number, columnWidth: number, log?: DebugScanLog) {
-    let top = rect.y + rect.height;
-    let topTolerance = Math.max(2, bodyFontSize * 0.4);
-    let previousCaption = lines
-        .filter((line) =>
-            line.page == rect.page &&
-            line.y > rect.y &&
-            line.y < top + topTolerance &&
-            lineCenterHorizontallyInsideRect(line, rect, 0) &&
-            (isCaptionLine(line, bodyFontSize, columnWidth) || isAlgorithmCaptionLine(line))
-        )
-        .sort((a, b) => a.y - b.y)[0];
-
-    if (!previousCaption) {
-        return rect;
-    }
-    log?.(`figure: previous caption trim anchor y=${previousCaption.y.toFixed(1)} text="${previousCaption.text}"`);
-
-    let captionBaselineBottom = previousCaption.y;
-    let captionBoxBottom = lineRect(previousCaption).y;
-    let prevLine = previousCaption;
-    let captionText = previousCaption.text;
-    let possibleContinuationLines = lines
-        .filter((line) =>
-            line.page == rect.page &&
-            line.y < previousCaption.y &&
-            line.y > rect.y
-        )
-        .sort((a, b) => b.y - a.y);
-
-    for (let line of possibleContinuationLines) {
-        if (Math.abs(line.x - previousCaption.x) >= columnWidth * 0.6) {
-            continue;
-        }
-
-        if (prevLine.y - line.y > Math.max(bodyFontSize * 1.6, 12)) {
-            break;
-        }
-
-        if (captionLooksComplete(captionText) && !/^[("']?\s*[A-Z]/.test(line.text.trim())) {
-            break;
-        }
-
-        if (!isLikelyCaptionContinuationLine(previousCaption, prevLine, line, bodyFontSize, columnWidth)) {
-            break;
-        }
-
-        log?.(`figure: previous caption continuation y=${line.y.toFixed(1)} text="${line.text}"`);
-        captionText = appendLineText(captionText, line.text);
-        captionBaselineBottom = line.y;
-        captionBoxBottom = Math.min(captionBoxBottom, lineRect(line).y);
-        prevLine = line;
-    }
-
-    let deepCaption = top - previousCaption.y > Math.max(40, bodyFontSize * 5.0);
-    // 通常は従来どおり baseline 基準で切る。深く入り込んだ caption は枠付き図で残りやすいため、
-    // bbox 下端と水平罫線を使って、文字の下側まで確実に落とす。
-    let fallbackTop = deepCaption
-        ? captionBoxBottom - Math.max(bodyFontSize * 1.8, previousCaption.fontSize * 1.4, 16)
-        : captionBaselineBottom - Math.max(bodyFontSize * 0.8, 8);
-    let separatorTop = deepCaption
-        ? findSeparatorBelowCaption(
-            rect,
-            mask,
-            captionBoxBottom - Math.max(bodyFontSize * 5.0, previousCaption.fontSize * 4.0, 40),
-            bodyFontSize,
-            log
-        )
-        : null;
-    let trimmedTop = clamp(separatorTop == null ? fallbackTop : Math.min(fallbackTop, separatorTop), rect.y + 24, top);
-    log?.(`figure: previous caption trim top ${top.toFixed(1)} -> ${trimmedTop.toFixed(1)}`);
-
-    return {
-        ...rect,
-        height: trimmedTop - rect.y
-    };
 }
 
 // Algorithm 環境はキャプション下に疑似コードが本文サイズで並ぶことが多い。
@@ -3533,6 +2633,138 @@ function estimateAlgorithmRect(
     };
 }
 
+// 本文とキャプションを、走査方向やセル解像度に依存しない境界として共有する。
+interface RegionBoundary {
+    kind: "body" | "caption" | "heading";
+    rect: PDF_Rect;
+    lines: TextLine[];
+}
+
+function collectRegionBoundaries(
+    lines: TextLine[], captions: FigureCandidate[], bodyFontSize: number,
+    columnWidth: number, bodyLayout: BodyLayoutModel, graphics: PDF_GraphicObject[], metadata?: DocumentMetadata
+): RegionBoundary[] {
+    let captionTextLines = captions.flatMap((caption) => caption.captionLines);
+    let captionLines = new Set(captionTextLines);
+    let markers = lines.filter((line) => /^[\d*†‡]+$/.test(line.text.trim()));
+    let blocks: RegionBoundary[] = captions.map((caption) => ({
+        kind: "caption", rect: sourceRectFromLines(caption.captionLines)!, lines: caption.captionLines
+    }));
+    for (let group of metadata ? [metadata.titleLines, metadata.authorLines, metadata.affiliationLines, [...metadata.ignoredLines]] : []) {
+        let rect = sourceRectFromLines(group);
+        if (rect) blocks.push({kind: "heading", rect, lines: group});
+    }
+    let groups: TextLine[][] = [];
+    let headings: TextLine[] = [];
+    graphics = graphics.filter((graphic) => !captionTextLines.some((line) => rectsOverlap(graphic, lineRect(line))));
+    let inGraphic = (rect: PDF_Rect) => graphics.some((graphic) => graphic.page == rect.page &&
+        graphic.kind != "image" && graphic.width > columnWidth * 0.6 && graphic.height > bodyFontSize * 1.5 &&
+        rectContainsRect(graphic, rect, bodyFontSize * 0.3));
+    for (let line of [...lines].sort((a, b) => a.page - b.page || b.y - a.y || a.x - b.x)) {
+        if (captionLines.has(line)) continue;
+        let footnote = markers.some((mark) => mark.page == line.page &&
+            mark.fontSize < line.fontSize * 0.8 && mark.x >= line.x - bodyFontSize &&
+            mark.x + mark.width <= line.x + 2 && mark.y >= line.y && mark.y - line.y < bodyFontSize);
+        if (line.width > columnWidth * 0.7 && (line.text.match(/[A-Za-z]{3,}/g)?.length ?? 0) >= 5 &&
+            (isListItemStart(line.text) || footnote)) {
+            blocks.push({kind: "body", rect: lineRect(line), lines: [line]});
+        }
+        if (inGraphic(lineRect(line))) continue;
+        if (isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize)) {
+            headings.push(line);
+            continue;
+        }
+        if (!isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) || isEquationRelationLine(line, columnWidth)) continue;
+        let group = groups.find((group) => {
+            let last = group[group.length - 1];
+            return last.page == line.page && last.y - line.y < bodyFontSize * 1.9 &&
+                last.y > line.y && Math.abs(group[0].x - line.x) < bodyFontSize * 2;
+        });
+        if (group) group.push(line);
+        else groups.push([line]);
+    }
+    for (let group of groups) {
+        if (group.length >= 2 && group.some((line) => line.width > columnWidth * 0.7) && group.reduce((sum, line) => sum + line.text.length, 0) > 70) {
+            blocks.push({kind: "body", rect: sourceRectFromLines(group)!, lines: group});
+        }
+    }
+    for (let line of headings) {
+        if (isHeadingText(line.text) || blocks.some((block) => block.kind == "body" && block.rect.page == line.page &&
+            line.y >= rectTop(block.rect) && line.y - rectTop(block.rect) < bodyFontSize * 2 &&
+            line.x < rectRight(block.rect) && line.x + line.width > block.rect.x)) {
+            blocks.push({kind: "heading", rect: lineRect(line), lines: [line]});
+        }
+    }
+    return blocks;
+}
+
+// 左右の所属は本文カラムから決め、本文のないページではキャプションの配置を使う。
+function regionColumnBounds(
+    anchor: PDF_Rect, captions: FigureCandidate[], layout: BodyLayoutModel,
+    columnWidth: number, metric: PageMetrics
+): PDF_Rect {
+    let center = anchor.x + anchor.width / 2;
+    let left = Math.max(8, Math.min(metric.minX, anchor.x) - 8);
+    let right = Math.min(metric.width - 8, Math.max(metric.maxX, rectRight(anchor)) + 8);
+    let columns = layout.columns.filter((column) => column.page == anchor.page);
+    let xs = columns.map((column) => column.x).sort((a, b) => a - b);
+    let splits: number[] = [];
+    if (anchor.width < columnWidth * 1.2 && Math.abs(center - metric.width / 2) > columnWidth * 0.18) {
+        if (xs.length < 2) xs = captions.map((caption) => caption.captionLines[0].x).sort((a, b) => a - b);
+        if (xs.length < 2) xs = layout.columns.map((column) => column.x).sort((a, b) => a - b);
+        let starts = xs.filter((x, i) => i == 0 || x - xs[i - 1] > columnWidth * 0.6);
+        for (let i = 1; i < starts.length; i++) splits.push((starts[i - 1] + columnWidth + starts[i]) / 2);
+    }
+    for (let split of splits) {
+        if (split > center) right = Math.min(right, split);
+        else left = Math.max(left, split);
+    }
+    // 図だけのページは他ページの段位置を使うため、段の境界に小さな余裕を持たせる。
+    if (!columns.length && captions.length == 1) {
+        left = Math.max(8, left - 8);
+        right = Math.min(metric.width - 8, right + 8);
+    }
+    return {page: anchor.page, x: left, width: Math.max(1, right - left), height: metric.height - 72, y: 36};
+}
+
+// 同じ横範囲にある本文・見出し・別キャプションを越えない探索範囲を作る。
+function boundRegionAtText(anchor: PDF_Rect, owner: PDF_Rect, direction: 1 | -1, blockers: PDF_Rect[], margin: number) {
+    let bottom = direction > 0 ? rectTop(anchor) + margin : owner.y;
+    let top = direction < 0 ? anchor.y - margin : rectTop(owner);
+    for (let block of blockers) {
+        if (block.page != anchor.page) continue;
+        let overlap = Math.min(rectRight(owner), rectRight(block)) - Math.max(owner.x, block.x);
+        if (overlap < Math.min(owner.width, block.width) * 0.25) continue;
+        if (direction > 0 && block.y >= rectTop(anchor)) top = Math.min(top, block.y - margin);
+        if (direction < 0 && rectTop(block) <= anchor.y) bottom = Math.max(bottom, rectTop(block) + margin);
+    }
+    return top > bottom ? {...owner, y: bottom, height: top - bottom} : null;
+}
+
+// 所属範囲の内容を囲む。許容する空白幅は PDF 座標で指定し、セル解像度と分離する。
+function fitRegionContent(mask: OccupancyMask, bounds: PDF_Rect, direction: 1 | -1, bodyFontSize: number, gapLimit: number) {
+    let range = maskRectRange(mask, bounds);
+    if (!range) return null;
+    let x0 = range.x1, x1 = range.x0, y0 = range.y1, y1 = range.y0;
+    let empty = 0;
+    for (let y = direction > 0 ? range.y0 : range.y1 - 1; y >= range.y0 && y < range.y1; y += direction) {
+        let occupied = false;
+        for (let x = range.x0; x < range.x1; x++) {
+            let bits = mask.cells[y * mask.width + x];
+            if (!(bits & MASK_CONTENT) || (bits & MASK_HARD_TEXT_BLOCKER)) continue;
+            x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1);
+            y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1);
+            occupied = true;
+        }
+        empty = occupied ? 0 : empty + 1;
+        if (y1 > y0 && empty * mask.cellSize > gapLimit) break;
+    }
+    if (x1 <= x0 || y1 <= y0) return null;
+    let padding = bodyFontSize * 0.4;
+    let rect = maskRangeToRect(mask, {x0, x1, y0, y1});
+    return intersectRectsLoose({ ...rect, x: rect.x - padding, y: rect.y - padding, width: rect.width + padding * 2, height: rect.height + padding * 2 }, bounds);
+}
+
 // 読み順に並んだ行から、キャプションと図表・疑似コード領域を先に集める。
 function collectFigureCandidates(
     lines: TextLine[],
@@ -3541,15 +2773,11 @@ function collectFigureCandidates(
     columnWidth: number,
     pageMetrics: Map<number, PageMetrics>,
     bodyLayout: BodyLayoutModel,
-    options?: PDF_ExtractOptions
+    options?: PDF_ExtractOptions,
+    pageInk = new Map<number, PDF_InkMask>(),
+    metadata?: DocumentMetadata
 ) {
     let candidates: FigureCandidate[] = [];
-    let pageMasks = new Map<number, OccupancyMask>();
-    for (let metric of pageMetrics.values()) {
-        let pageRect = {page: metric.page, x: 0, y: 0, width: metric.width, height: metric.height};
-        pageMasks.set(metric.page, buildOccupancyMask(pageRect, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout));
-    }
-
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i];
         let algorithmCaption = isAlgorithmCaptionLine(line);
@@ -3563,11 +2791,6 @@ function collectFigureCandidates(
         if (!metric) {
             continue;
         }
-        let pageMask = pageMasks.get(line.page);
-        if (!pageMask) {
-            continue;
-        }
-
         if (algorithmCaption) {
             candidates.push({
                 startIndex: i,
@@ -3584,7 +2807,6 @@ function collectFigureCandidates(
         }
 
         let captionLines = 1;
-        let usedOpenTableCaptionContinuation = false;
         while (captionLines < 20 && endIndex + 1 < lines.length) {
             let next = lines[endIndex + 1];
             let tableCaption = isTableCaption(caption);
@@ -3624,67 +2846,12 @@ function collectFigureCandidates(
                 break;
             }
 
-            if (openTableCaptionContinuation) {
-                usedOpenTableCaptionContinuation = true;
-            }
             caption = appendLineText(caption, next.text);
             endIndex++;
             captionLines++;
         }
 
-        let tableCaption = isTableCaption(caption);
-        let scanLog = scanLoggerForCaption(options, caption);
-        let rect: PDF_Rect | null = null;
-        if (tableCaption) {
-            scanLog?.(`caption: "${caption}"`);
-            rect = fitTableRectByBitmap(
-                lines.slice(i, endIndex + 1),
-                lines,
-                usedOpenTableCaptionContinuation,
-                pageMask,
-                bodyFontSize,
-                columnWidth,
-                metric,
-                scanLog
-            );
-            if (rect) {
-                scanLog?.(`table: after bitmap ${fmtRect(rect)}`);
-            }
-            else {
-                scanLog?.("table: bitmap scan failed -> rect=null");
-            }
-        }
-        else {
-            let anchorRect = captionSearchAnchorRect(line, columnWidth, metric);
-            if (anchorRect) {
-                scanLog?.(`caption: "${caption}"`);
-                scanLog?.(`figure: anchor ${fmtRect(anchorRect)}`);
-                rect = fitRectByCaptionSearch(anchorRect, line, pageMask, bodyFontSize, columnWidth, metric, scanLog);
-                scanLog?.(`figure: after bitmap scan ${fmtRect(rect)}`);
-                if (rect) {
-                    rect = trimFigureRectAtPreviousCaption(rect, lines, pageMask, bodyFontSize, columnWidth, scanLog);
-                    scanLog?.(`figure: after final previous-caption trim ${fmtRect(rect)}`);
-                    rect = padFigureBottomTowardCaption(rect, line, bodyFontSize);
-                    scanLog?.(`figure: after caption padding ${fmtRect(rect)}`);
-                    scanLog?.(`figure: final ${fmtRect(rect)}`);
-                }
-            }
-        }
-
         let collectedCaptionLines = lines.slice(i, endIndex + 1);
-        if (hasFullPageImage(graphics, metric)) {
-            rect = estimateRasterFigureRect(
-                collectedCaptionLines,
-                tableCaption,
-                lines,
-                bodyFontSize,
-                columnWidth,
-                metric,
-                bodyLayout,
-                scanLog
-            ) ?? rect;
-        }
-
         candidates.push({
             startIndex: i,
             endIndex,
@@ -3692,13 +2859,52 @@ function collectFigureCandidates(
             node: new PDF_Node(
                 caption,
                 PDF_NodeType.FIGURE,
-                rect ?? undefined,
+                undefined,
                 sourceRectFromLines(collectedCaptionLines)
             )
         });
     }
 
-    return candidates;
+    let masks = new Map<number, OccupancyMask>();
+    let boundaries = collectRegionBoundaries(lines, candidates, bodyFontSize, columnWidth, bodyLayout, graphics, metadata);
+    for (let metric of pageMetrics.values()) {
+        let pageRect = {page: metric.page, x: 0, y: 0, width: metric.width, height: metric.height};
+        let captions = candidates.filter((candidate) => candidate.captionLines[0].page == metric.page);
+        if (!captions.length && !options?.debugMaskSink) continue;
+        let pageGraphics = graphics.filter((graphic) => !graphicExcludedByCaption(graphic, captions.flatMap((c) => c.captionLines), metric));
+        let mask = buildOccupancyMask(pageRect, lines, pageGraphics, bodyFontSize, columnWidth, metric, bodyLayout);
+        let ink = pageInk.get(metric.page);
+        if (ink) {
+            for (let i = 0; i < mask.cells.length; i++) mask.cells[i] &= ~MASK_SHAPE;
+            for (let y = 0; y < mask.height; y++) for (let x = 0; x < mask.width; x++) {
+                let ix = Math.floor(x * mask.cellSize / ink.cellSize);
+                let iy = Math.floor(y * mask.cellSize / ink.cellSize);
+                if (ix < ink.width && iy < ink.height && ink.cells[iy * ink.width + ix]) mask.cells[y * mask.width + x] |= MASK_SHAPE;
+            }
+        }
+        // 行の間も本文の境界に含め、図形と同じセルに重なっても境界を維持する。
+        for (let block of boundaries.filter((block) => block.rect.page == metric.page)) {
+            drawRectToMask(mask, block.rect, block.kind == "body" ? MASK_BODY_LAYOUT : block.kind == "heading" ? MASK_HEADING : MASK_CAPTION);
+        }
+        masks.set(metric.page, mask);
+        for (let candidate of [...captions].sort((a, b) => Number(isTableCaption(b.node.str)) - Number(isTableCaption(a.node.str)))) {
+            if (isAlgorithmCaptionLine(candidate.captionLines[0])) continue;
+            let log = scanLoggerForCaption(options, candidate.node.str);
+            let anchor = sourceRectFromLines(candidate.captionLines)!;
+            let owner = regionColumnBounds(anchor, captions, bodyLayout, columnWidth, metric);
+            let direction: 1 | -1 = isTableCaption(candidate.node.str) ? -1 : 1;
+            let limits = boundaries.filter((block) => !candidate.captionLines.includes(block.lines[0])).map((block) => block.rect);
+            limits.push(...captions.filter((other) => other !== candidate && isTableCaption(other.node.str) && other.node.rect).map((other) => other.node.rect!));
+            let bounds = boundRegionAtText(anchor, owner, direction, limits, bodyFontSize * 0.3);
+            log?.(`region: caption="${candidate.node.str}" owner=${fmtRect(owner)} bounds=${fmtRect(bounds)}`);
+            if (!bounds) continue;
+            let rect = fitRegionContent(mask, bounds, direction, bodyFontSize, bodyFontSize * (direction < 0 ? 0.7 : 4));
+            if (rect && rect.width >= 24 && rect.height >= 12) candidate.node.rect = rect;
+            log?.(`region: result ${fmtRect(rect)}`);
+        }
+    }
+
+    return {figures: candidates, boundaries, masks};
 }
 
 // PDF由来の不可視文字を除き、単独または式本体の行末にある括弧付き番号を探索の起点にする。
@@ -3707,141 +2913,113 @@ function isEquationNumberLine(line: TextLine) {
     return /\(\d+[a-z]?\)$/.test(text);
 }
 
-// 行末番号を含む式本体と、番号だけが独立した行を区別する。
-function isStandaloneEquationNumberLine(line: TextLine) {
-    let text = line.text.replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "").trim();
-    return /^\(\d+[a-z]?\)$/.test(text);
-}
-
 // 等号や主要な演算記号を含む短い行を、表示数式の本体候補として扱う。
 function isEquationRelationLine(line: TextLine, columnWidth: number) {
     return line.width <= columnWidth * 1.05 &&
-        /(?:=|[≤≥≠≈≃≡×÷∑∏√⊕⊗∧∨˄˅])/.test(line.text);
+        /(?:=|[≤≥≠≈≃≡×÷∫∑∏√⊕⊗∧∨˄˅])/.test(line.text);
 }
 
-// 数式番号から上方向へ連続する式行を集め、上付き・下付きも含む一枚の切り出し領域を作る。
+// 本文と隣接する式番号を境界に、上下の式行・添字・罫線を一つの領域へまとめる。
 function collectEquationCandidates(
-    lines: TextLine[],
-    bodyFontSize: number,
-    columnWidth: number,
-    pageMetrics: Map<number, PageMetrics>,
-    bodyLayout: BodyLayoutModel,
-    excludedRects: PDF_Rect[]
+    lines: TextLine[], bodyFontSize: number, columnWidth: number,
+    pageMetrics: Map<number, PageMetrics>, bodyLayout: BodyLayoutModel,
+    excludedRects: PDF_Rect[], boundaries: RegionBoundary[], graphics: PDF_GraphicObject[]
 ) {
     let candidates: EquationCandidate[] = [];
-    let usedLineIndices = new Set<number>();
-
-    for (let anchorIndex = 0; anchorIndex < lines.length; anchorIndex++) {
-        let anchor = lines[anchorIndex];
-        let metric = pageMetrics.get(anchor.page);
-        if (
-            !metric ||
-            !isEquationNumberLine(anchor) ||
-            (!isStandaloneEquationNumberLine(anchor) && !isEquationRelationLine(anchor, columnWidth)) ||
-            excludedRects.some((rect) => lineCenterInsideRect(anchor, rect))
-        ) {
-            continue;
+    let used = new Set<number>();
+    let blockedLines = new Set(boundaries.flatMap((block) => block.lines));
+    let available = lines.map((line, index) => ({line, index})).filter(({line}) =>
+        !blockedLines.has(line) && !excludedRects.some((rect) => lineCenterInsideRect(line, rect))
+    );
+    let anchors = available.filter(({line}) => isEquationNumberLine(line) || isDisplayMathLine(line, columnWidth));
+    // 番号付きのまとまりを先に確定し、その残りから番号なしの独立数式を拾う。
+    anchors.sort((a, b) => Number(isEquationNumberLine(b.line)) - Number(isEquationNumberLine(a.line)));
+    for (let anchor of anchors) {
+        if (used.has(anchor.index)) continue;
+        let numbered = isEquationNumberLine(anchor.line);
+        let metric = pageMetrics.get(anchor.line.page)!;
+        let numberRight = anchor.line.x + anchor.line.width;
+        let columns = bodyLayout.columns.filter((column) => column.page == anchor.line.page);
+        let column = columns.filter((column) => numbered
+            ? Math.abs(column.x + columnWidth - numberRight) < columnWidth * 0.3
+            : anchor.line.x >= column.x - bodyFontSize && numberRight <= column.x + columnWidth + bodyFontSize
+        ).sort((a, b) => Math.abs(a.x + columnWidth - numberRight) - Math.abs(b.x + columnWidth - numberRight))[0];
+        if (!column) continue;
+        let owner = {page: anchor.line.page, x: column.x - bodyFontSize * 0.6, y: 0,
+            width: columnWidth + bodyFontSize * 1.8, height: metric.height};
+        let anchorRect = lineRect(anchor.line);
+        let blockers = [...boundaries.map((block) => block.rect), ...excludedRects];
+        let above = boundRegionAtText(anchorRect, owner, 1, blockers, 0);
+        let below = boundRegionAtText(anchorRect, owner, -1, blockers, 0);
+        if (!above || !below) continue;
+        let bottom = below.y, top = rectTop(above);
+        // 隣の式番号がある場合は、番号間の中間を越えて式を連結しない。
+        for (let other of available) {
+            if (other.index == anchor.index || !isEquationNumberLine(other.line) || other.line.page != owner.page ||
+                Math.abs(other.line.x + other.line.width - (column.x + columnWidth)) > columnWidth * 0.3) continue;
+            if (other.line.y > anchor.line.y) top = Math.min(top, (other.line.y + anchor.line.y) / 2);
+            if (other.line.y < anchor.line.y) bottom = Math.max(bottom, (other.line.y + anchor.line.y) / 2);
         }
-
-        // 式本体と番号が同じ TextLine の場合もあるため、行中心ではなく右端でカラムを決める。
-        let numberRight = anchor.x + anchor.width;
-        let columns = bodyLayout.columns.filter((column) => column.page == anchor.page);
-        let column = columns
-            .filter((candidate) =>
-                numberRight >= candidate.x + columnWidth * 0.7 &&
-                numberRight <= candidate.x + columnWidth * 1.15
-            )
-            .sort((a, b) =>
-                Math.abs(a.x + columnWidth - numberRight) - Math.abs(b.x + columnWidth - numberRight)
-            )[0];
-        if (!column) {
-            continue;
-        }
-
-        let columnLeft = column.x - 6;
-        let columnRight = column.x + columnWidth + 12;
-        let nearbyRelations = lines
-            .map((line, index) => ({line, index}))
-            .filter(({line}) =>
-                line.page == anchor.page &&
-                line.y >= anchor.y - bodyFontSize * 5 &&
-                line.y <= anchor.y + bodyFontSize * 5 &&
-                line.x + line.width / 2 >= columnLeft &&
-                line.x + line.width / 2 <= columnRight &&
-                isEquationRelationLine(line, columnWidth)
-            )
-            .sort((a, b) => a.line.y - b.line.y);
-
-        // 式番号の上下にある関係式のうち、baseline 間隔が連続するまとまりだけを採用する。
-        let anchorRelationIndex = 0;
-        for (let index = 1; index < nearbyRelations.length; index++) {
-            if (
-                Math.abs(nearbyRelations[index].line.y - anchor.y) <
-                Math.abs(nearbyRelations[anchorRelationIndex].line.y - anchor.y)
-            ) {
-                anchorRelationIndex = index;
+        let bounds = {...owner, y: bottom, height: top - bottom};
+        let nearby = available.filter(({line, index}) => !used.has(index) && line.page == bounds.page &&
+            line.y >= bottom && line.y <= top && line.x + line.width / 2 >= bounds.x && line.x + line.width / 2 <= rectRight(bounds));
+        let seed = nearby.filter(({line}) => numbered ? isEquationRelationLine(line, columnWidth) : isDisplayMathLine(line, columnWidth))
+            .sort((a, b) => Math.abs(a.line.y - anchor.line.y) - Math.abs(b.line.y - anchor.line.y))[0];
+        if (!seed) continue;
+        let members = new Set([seed.index]);
+        let rect = lineRect(seed.line);
+        // 接する行を上下とも同じ規則で集める。添字や分数も固定の探索高さに依存しない。
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (let entry of nearby) {
+                if (members.has(entry.index)) continue;
+                let box = lineRect(entry.line);
+                let gap = Math.max(rect.y - rectTop(box), box.y - rectTop(rect), 0);
+                if (gap > bodyFontSize * 0.65) continue;
+                members.add(entry.index);
+                rect = unionRects([rect, box])!;
+                changed = true;
             }
         }
-        let relationStart = anchorRelationIndex;
-        let relationEnd = anchorRelationIndex + 1;
-        while (
-            relationStart > 0 &&
-            nearbyRelations[relationStart].line.y - nearbyRelations[relationStart - 1].line.y <= bodyFontSize * 2.2
-        ) {
-            relationStart--;
+        if (!members.has(anchor.index)) continue;
+        let sourceLines = [...members].map((index) => lines[index]);
+        if (!numbered) {
+            // 本文中の式や箇条書きの誤検出を避け、字下げと上下の余白がある式だけを採用する。
+            if (rect.x < column.x + bodyFontSize * 0.8 || rect.width > columnWidth * 0.95 ||
+                rect.y - bottom < bodyFontSize * 0.6 || top - rectTop(rect) < bodyFontSize * 0.6 ||
+                sourceLines.some((line) => !isMathFragment(line.text) || isListItemStart(line.text) || /^[\s\u0000-\u001f]*[●◦▪\uf0b7]/.test(line.text))) continue;
         }
-        while (
-            relationEnd < nearbyRelations.length &&
-            nearbyRelations[relationEnd].line.y - nearbyRelations[relationEnd - 1].line.y <= bodyFontSize * 2.2
-        ) {
-            relationEnd++;
-        }
-        let relationLines = nearbyRelations.slice(relationStart, relationEnd);
-        if (relationLines.length == 0) {
-            continue;
-        }
-
-        // 分数や総和記号の上下要素を落とさないよう、式本体の上下に本文1行分だけ余裕を持たせる。
-        let minY = Math.min(anchor.y, ...relationLines.map(({line}) => line.y)) - bodyFontSize * 1.15;
-        let maxY = Math.max(anchor.y, ...relationLines.map(({line}) => line.y)) + bodyFontSize * 1.15;
-        let equationLines = lines
-            .map((line, index) => ({line, index}))
-            .filter(({line, index}) =>
-                !usedLineIndices.has(index) &&
-                line.page == anchor.page &&
-                line.y + line.fontSize / 2 >= minY &&
-                line.y + line.fontSize / 2 <= maxY &&
-                line.x + line.width / 2 >= columnLeft &&
-                line.x + line.width / 2 <= columnRight
-            );
-        if (!equationLines.some(({index}) => index == anchorIndex)) {
-            continue;
-        }
-
-        let sourceLines = equationLines.map(({line}) => line);
-        let sourceRect = sourceRectFromLines(sourceLines);
-        if (!sourceRect) {
-            continue;
-        }
-        let rect = expandRect(sourceRect, Math.max(3, bodyFontSize * 0.4), metric);
-        if (excludedRects.some((excluded) => rectsOverlap(rect, excluded))) {
-            continue;
-        }
-
-        let lineIndices = equationLines.map(({index}) => index);
-        lineIndices.forEach((index) => usedLineIndices.add(index));
-        let text = [...sourceLines]
-            .sort((a, b) => b.y - a.y || a.x - b.x)
-            .map((line) => line.text)
-            .join(" ");
-        candidates.push({
-            startIndex: Math.min(...lineIndices),
-            lineIndices,
-            node: new PDF_Node(text, PDF_NodeType.EQUATION, rect, sourceRect)
-        });
+        let sourceRect = sourceRectFromLines(sourceLines)!;
+        let decorations = graphics.filter((graphic) => graphic.page == rect.page && graphic.kind == "path" &&
+            graphic.width <= columnWidth * 1.1 && graphic.height <= rect.height + bodyFontSize &&
+            rectContainsRect(bounds, graphic, 0) && rectsOverlap(graphic, expandRect(rect, bodyFontSize * 0.4, metric)));
+        rect = unionRects([rect, ...decorations])!;
+        rect = intersectRectsLoose(expandRect(rect, bodyFontSize * 0.4, metric), bounds)!;
+        if (!rect || excludedRects.some((excluded) => rectsOverlap(rect, excluded))) continue;
+        for (let index of members) used.add(index);
+        candidates.push({startIndex: Math.min(...members), lineIndices: [...members],
+            node: new PDF_Node(sourceLines.sort((a, b) => b.y - a.y || a.x - b.x).map((line) => line.text).join(" "),
+                PDF_NodeType.EQUATION, rect, sourceRect)});
     }
-
     return candidates;
+}
+
+function isMathFragment(text: string) {
+    // 数式中の if/otherwise などの短い説明は許容し、通常の英文が続く行を除く。
+    let words = text.match(/[A-Za-z]{3,}/g) ?? [];
+    return words.filter((word) => !/^(?:if|otherwise|where|for|and|or|sin|cos|log|exp|max|min|lim)$/i.test(word)).length <= 2;
+}
+
+function isDisplayMathLine(line: TextLine, columnWidth: number) {
+    return isEquationRelationLine(line, columnWidth) && isMathFragment(line.text);
+}
+
+function unionRects(rects: PDF_Rect[]): PDF_Rect | null {
+    if (!rects.length) return null;
+    let x = Math.min(...rects.map((rect) => rect.x)), y = Math.min(...rects.map((rect) => rect.y));
+    return {page: rects[0].page, x, y,
+        width: Math.max(...rects.map(rectRight)) - x, height: Math.max(...rects.map(rectTop)) - y};
 }
 
 function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
@@ -3857,15 +3035,6 @@ function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
         centerY >= rect.y &&
         centerY <= rect.y + rect.height
     );
-}
-
-function lineCenterHorizontallyInsideRect(line: TextLine, rect: PDF_Rect, margin: number) {
-    if (line.page != rect.page) {
-        return false;
-    }
-
-    let centerX = line.x + line.width / 2;
-    return centerX >= rect.x - margin && centerX <= rect.x + rect.width + margin;
 }
 
 // 抽出の中心処理。ページごとの TextItem から、タイトル・見出し・本文・図表を作る。
@@ -3902,16 +3071,17 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     // 行単位の前処理: 見出し分割とページ番号除去を行う。小さい図表内テキストは矩形推定で使うため残す。
     lines = splitCaptionLines(splitHeadingLines(lines, bodyFontSize))
         .filter((line) => line.text != "")
-        .filter((line) => !isPageDecoration(line));
+        .filter((line) => !isPageDecoration(line, pageMetrics.get(line.page)));
     lines = normalizeDropCaps(lines, bodyFontSize);
     lines = splitMixedAuthorAffiliationLines(lines);
     let metadata = collectDocumentMetadata(lines, bodyFontSize, pageMetrics.get(1));
 
     // 読み順にした行から Figure/Table を先に集め、後続の本文抽出で除外できる形にする。
+    pageMetrics = estimatePageMetrics(lines.filter((line) => !metadata.ignoredLines.has(line)), pages);
     let bodyLayout = estimateBodyLayout(lines, bodyFontSize, columnWidth);
     let readingLines = sortLinesForReading(lines);
-    let figures = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics, bodyLayout, options);
-    emitDebugMasks(options, pageMetrics, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout);
+    let {figures, boundaries, masks} = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics, bodyLayout, options, new Map(pages.flatMap((page, i) => !Array.isArray(page) && page.ink ? [[i + 1, page.ink] as const] : [])), metadata);
+    emitDebugMasks(options, pageMetrics, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout, masks);
     let figureByStart = new Map(figures.map((figure) => [figure.startIndex, figure]));
     let captionLineIndices = new Set<number>();
     let figureRects = figures
@@ -3932,7 +3102,9 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         columnWidth,
         pageMetrics,
         bodyLayout,
-        figureRects
+        figureRects,
+        boundaries,
+        graphics
     );
     let equationByStart = new Map(equations.map((equation) => [equation.startIndex, equation]));
     let equationLineIndices = new Set(equations.flatMap((equation) => equation.lineIndices));
@@ -4026,7 +3198,10 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             continue;
         }
 
-        if (!inReferencesSection && shouldDropStructuralFragmentLine(line, bodyFontSize, columnWidth, relaxedHeading)) {
+        // 回収できなかった数式記号は本文に残す。小さいという理由だけで式を失わない。
+        if (!inReferencesSection && (isPullQuoteLine(line, bodyFontSize) ||
+            line.fontSize < bodyFontSize - 1.2 && !isHeadingLine(line, bodyFontSize, relaxedHeading) &&
+            !isDisplayMathLine(line, columnWidth))) {
             let prevLine = i > 0 ? readingLines[i - 1] : null;
             let nextLine = readingLines[i + 1];
             if (

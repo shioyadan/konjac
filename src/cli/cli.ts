@@ -248,7 +248,7 @@ async function extractPDFFile(
 
     for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
         let page = await pdf.getPage(pageNumber);
-        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>));
+        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>, createCanvas));
         pageProxies.push(page);
     }
 

@@ -1427,7 +1427,12 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
     let pageProxies: any[] = [];
     for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
         let page = await pdf.getPage(pageNumber);
-        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>));
+        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>, (width, height) => {
+            let canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            return canvas;
+        }));
         pageProxies.push(page);
         if (progress) {
             progress.value = pageNumber;

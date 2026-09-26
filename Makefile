@@ -7,7 +7,7 @@ TRANSLATED_HTML_OUT ?= work/test.translated.html
 WEB_HOST ?= 127.0.0.1
 WEB_PORT ?= 8765
 
-.PHONY: all typecheck extension-build web-build web-serve cli-build package cli cli-json cli-translation-json cli-import init clean distclean
+.PHONY: all typecheck test regression extension-build web-build web-serve cli-build package cli cli-json cli-translation-json cli-import init clean distclean
 
 # 拡張版はCMapをディレクトリとして同梱し、Web版は単一HTMLへ埋め込む
 all: extension-build web-build cli-build
@@ -67,3 +67,15 @@ clean:
 distclean: clean
 	rm node_modules -r -f
 
+
+# PDF なしで座標・境界・数式の回帰を確認する。
+test:
+	node tests/extractor.test.cjs
+
+# 手元の work/*.pdf を一括変換し、目視で指定した内容範囲と除外点を確認する。
+regression: cli-build test
+	@REGRESSION_OUT=$$(mktemp -d /tmp/konjac-regression.XXXXXX); \
+	for PDF_FILE in work/*.pdf; do \
+		node dist/cli/cli.cjs --json "$$PDF_FILE" > "$$REGRESSION_OUT/$$(basename "$$PDF_FILE" .pdf).json" || exit 1; \
+	done; \
+	node tests/pdf-regression.cjs "$$REGRESSION_OUT"

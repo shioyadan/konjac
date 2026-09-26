@@ -1,0 +1,77 @@
+{
+  "test2": {
+    "figures": 22, "equations": 0,
+    "regions": [
+      {"caption": "Figure 1:", "page": 1, "content": [335, 445, 205, 225], "exclude": [[200, 600]]},
+      {"caption": "Figure 5:", "page": 4, "content": [342, 121, 205, 59], "exclude": [[450, 195]]},
+      {"caption": "Table 2:", "page": 9, "content": [57, 90, 235, 217], "exclude": [[330, 200]]},
+      {"caption": "Figure 17:", "page": 11, "content": [60, 610, 485, 115]}
+    ]
+  },
+  "test3": {
+    "figures": 10, "equations": 0,
+    "regions": [
+      {"caption": "Figure 1.", "page": 1, "content": [319, 470, 233, 116], "exclude": [[440, 640]]},
+      {"caption": "Figure 2.", "page": 5, "content": [64, 280, 230, 438]},
+      {"caption": "Figure 3.", "page": 5, "content": [324, 280, 230, 438]},
+      {"caption": "TABLE 4.", "page": 6, "content": [72, 544, 463, 155]}
+    ]
+  },
+  "test4": {
+    "figures": 14, "equations": 13,
+    "regions": [
+      {"equation": "9", "page": 5, "content": [87, 185, 195, 29]},
+      {"equation": "12", "page": 5, "content": [321, 533, 220, 44]},
+      {"equation": "13", "page": 5, "content": [313, 402, 230, 52]}
+    ]
+  },
+  "test5": {
+    "figures": 21, "equations": 0,
+    "regions": [
+      {"caption": "Table II ", "page": 5, "content": [318, 610, 227, 83], "exclude": [[440, 570]]},
+      {"caption": "Figure 6.", "page": 5, "content": [330, 430, 202, 163], "exclude": [[440, 635]]},
+      {"caption": "Figure 12.", "page": 9, "content": [125, 579, 374, 139]}
+    ]
+  },
+  "test6": {
+    "figures": 7, "equations": 0,
+    "regions": [
+      {"caption": "Figure 19.2.1:", "page": 2, "content": [37, 560, 245, 128], "exclude": [[450, 610]]},
+      {"caption": "Figure 19.2.2:", "page": 2, "content": [299, 548, 247, 141], "exclude": [[150, 610]]},
+      {"caption": "Figure 19.2.3:", "page": 2, "content": [39, 339, 237, 83], "exclude": [[440, 400]]},
+      {"caption": "Figure 19.2.4:", "page": 2, "content": [300, 322, 245, 167], "exclude": [[150, 400]]},
+      {"caption": "Figure 19.2.5:", "page": 2, "content": [42, 103, 240, 144], "exclude": [[430, 160]]},
+      {"caption": "Figure 19.2.6:", "page": 2, "content": [300, 130, 244, 72], "exclude": [[150, 160]]},
+      {"caption": "Figure 19.2.7:", "page": 3, "content": [42, 550, 247, 135], "exclude": [[480, 650]]}
+    ]
+  },
+  "test7": {
+    "figures": 10, "equations": 0,
+    "regions": [
+      {"caption": "FIGURE 1.", "page": 3, "content": [77, 514, 429, 165], "exclude": [[85, 732]]},
+      {"caption": "FIGURE 3.", "page": 5, "content": [305, 80, 204, 121], "exclude": [[400, 234]]},
+      {"caption": "FIGURE 4.", "page": 7, "content": [80, 312, 423, 163]},
+      {"caption": "FIGURE 7.", "page": 9, "content": [74, 524, 431, 152], "exclude": [[85, 732]]},
+      {"caption": "FIGURE 9.", "page": 10, "content": [64, 530, 420, 146]}
+    ]
+  },
+  "test8": {
+    "figures": 10, "equations": 0,
+    "headings": ["V. RESULTS", "VI. CONCLUSION", "ACKNOWLEDGEMENTS", "REFERENCES"],
+    "regions": [
+      {"caption": "Figure 1.", "page": 2, "content": [325, 436, 225, 277], "exclude": [[150, 530]]},
+      {"caption": "TABLE I ", "page": 6, "content": [325, 618, 229, 77], "exclude": [[180, 660]]},
+      {"caption": "TABLE II ", "page": 6, "content": [325, 498, 229, 78], "exclude": [[180, 540]]},
+      {"caption": "TABLE III ", "page": 6, "content": [64, 186, 489, 160], "exclude": [[310, 45]]}
+    ]
+  },
+  "test9": {
+    "figures": 11, "equations": 15,
+    "regions": [
+      {"caption": "TABLE IV ", "page": 8, "content": [50, 456, 510, 253], "exclude": [[160, 360], [420, 200]]},
+      {"caption": "Fig. 7.", "page": 6, "content": [350, 375, 182, 350]},
+      {"equation": "8", "page": 5, "content": [50, 123, 242, 72]},
+      {"equation": "10", "page": 5, "content": [320, 262, 242, 45]}
+    ]
+  }
+}
