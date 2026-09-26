@@ -73,5 +73,40 @@
       {"equation": "8", "page": 5, "content": [50, 123, 242, 72]},
       {"equation": "10", "page": 5, "content": [320, 262, 242, 45]}
     ]
+  },
+  "test10": {
+    "figures": 9, "equations": 0,
+    "regions": [
+      {"caption": "Figure 1.", "page": 3, "content": [119, 563, 375, 155], "exclude": [[200, 536]]},
+      {"caption": "Figure 2.", "page": 4, "content": [83, 550, 185, 167], "exclude": [[200, 527]]},
+      {"caption": "Table 1.", "page": 6, "content": [318, 582, 228, 138], "exclude": [[400, 555], [150, 650]]},
+      {"caption": "Figure 3.", "page": 7, "content": [80, 604, 461, 113], "exclude": [[200, 584]]},
+      {"caption": "Figure 4.", "page": 8, "content": [80, 610, 461, 107], "exclude": [[200, 589]]},
+      {"caption": "Figure 5.", "page": 8, "content": [80, 425, 461, 118], "exclude": [[200, 396], [200, 587]]},
+      {"caption": "Figure 6.", "page": 9, "content": [80, 602, 461, 114], "exclude": [[200, 579]]},
+      {"caption": "Figure 7.", "page": 9, "content": [80, 387, 461, 136], "exclude": [[200, 363], [200, 580]]},
+      {"caption": "Figure 8.", "page": 10, "content": [64, 588, 228, 130], "exclude": [[180, 563], [400, 660]]}
+    ]
+  },
+  "test11": {
+    "figures": 16, "equations": 0,
+    "regions": [
+      {"caption": "Figure 1:", "page": 2, "content": [60, 180, 237, 134], "exclude": [[63, 330], [180, 162]]},
+      {"caption": "Figure 2:", "page": 2, "content": [316, 467, 240, 90], "exclude": [[400, 449]]},
+      {"caption": "Table 1:", "page": 3, "content": [63, 479, 223, 108], "exclude": [[160, 461], [160, 430]]},
+      {"caption": "Table 2:", "page": 5, "content": [88, 180, 174, 163], "exclude": [[160, 169], [160, 365]]},
+      {"caption": "Table 3:", "page": 5, "content": [318, 599, 237, 44], "exclude": [[400, 590], [400, 655]]},
+      {"caption": "Table 4:", "page": 5, "content": [340, 320, 193, 185], "exclude": [[400, 310], [400, 522]]},
+      {"caption": "Table 5:", "page": 6, "content": [89, 621, 170, 99], "exclude": [[170, 612]]},
+      {"caption": "Figure 3:", "page": 6, "content": [323, 137, 233, 131], "exclude": [[400, 119], [400, 292]]},
+      {"caption": "Figure 4:", "page": 7, "content": [323, 557, 233, 105], "exclude": [[400, 539]]},
+      {"caption": "Figure 5:", "page": 7, "content": [323, 171, 233, 105], "exclude": [[400, 153]]},
+      {"caption": "Figure 6:", "page": 8, "content": [60, 223, 235, 108], "exclude": [[65, 347], [180, 205]]},
+      {"caption": "Figure 7:", "page": 8, "content": [323, 535, 233, 107], "exclude": [[400, 515]]},
+      {"caption": "Table 6:", "page": 9, "content": [87, 578, 177, 142], "exclude": [[175, 560], [175, 500]]},
+      {"caption": "Figure 8:", "page": 9, "content": [60, 441, 235, 106], "exclude": [[175, 600], [175, 425]]},
+      {"caption": "Figure 9:", "page": 9, "content": [323, 581, 233, 105], "exclude": [[400, 562]]},
+      {"caption": "Figure 10:", "page": 9, "content": [323, 125, 231, 105], "exclude": [[400, 105]]}
+    ]
   }
 }

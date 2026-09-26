@@ -59,6 +59,24 @@ test('a table above a figure keeps its own content', () => {
     assert.ok(top(b.rect) <= a.rect.y);
 });
 
+test('a caption below a ruled table does not claim the following chart', () => {
+    const table = shape(55, 600, 210, 100), chart = shape(55, 430, 210, 120);
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 330),
+        text('Table 1. Measurements.', 40, 580, 230, 9), text('Figure 1. Diagram.', 40, 390, 230, 9)],
+        [table, shape(55, 600, 210, 1), chart]);
+    const [a, b] = figures(nodes);
+    assert.ok(encloses(a.rect, table));
+    assert.ok(encloses(b.rect, chart));
+    assert.ok(a.rect.y > top(b.rect));
+});
+
+test('a short final word remains with prose above a figure', () => {
+    const nodes = extract([...paragraph(40, 710), text('results.', 40, 668, 30), ...paragraph(40, 330),
+        text('Figure 1. Diagram.', 40, 390, 230, 9)], [shape(55, 430, 210, 210)]);
+    assert.ok(top(figures(nodes)[0].rect) < 665);
+    assert.ok(nodes.some((node) => node.type === 1 && node.str.includes('results.')));
+});
+
 test('adjacent numbered equations do not merge', () => {
     const nodes = extract([...paragraph(40, 730), ...paragraph(40, 590),
         text('x = a + b', 100, 665, 100), text('(1)', 265, 665, 15),
@@ -119,6 +137,22 @@ test('rotated page coordinates agree with the rendering viewport', async () => {
     };
     const result = await extractPageInputFromPDFPage(page, 1, {});
     assert.deepEqual(result.items[0].transform, [0, -10, 10, 0, 100, 560]);
+});
+
+test('solid image masks contribute table rules while white masks are ignored', async () => {
+    const page = {
+        getViewport: () => ({width: 600, height: 800, transform: [1, 0, 0, -1, 0, 800]}),
+        getTextContent: async () => ({items: []}),
+        getOperatorList: async () => ({fnArray: [1, 2, 3, 2, 4], argsArray: [
+            [200, 0, 0, -0.5, 40, 600], [], new Uint8ClampedArray([255, 255, 255]), [], []
+        ]})
+    };
+    const input = await extractPageInputFromPDFPage(page, 1, {
+        transform: 1, paintSolidColorImageMask: 2, setFillRGBColor: 3, paintImageXObject: 4
+    });
+    assert.equal(input.graphics.length, 2);
+    assert.deepEqual(input.graphics[0], {page: 1, kind: 'path', x: 40, y: 599.5, width: 200, height: 0.5, strokeWidth: 0});
+    assert.equal(input.graphics[1].kind, 'image', 'ordinary images do not inherit the fill color');
 });
 
 test('unclassified small mathematical fragments are not silently discarded', () => {

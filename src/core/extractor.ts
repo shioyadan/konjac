@@ -461,8 +461,11 @@ async function extractGraphicsFromPage(page: any, pageNumber: number, ops: Recor
                 pendingPath = null;
             }
         }
-        else if (fn == ops.paintImageXObject || fn == ops.paintJpegXObject || fn == ops.paintInlineImageXObject) {
-            let object = transformBox(pageNumber, ctm, [0, 0, 1, 1], 0, "image");
+        else if (fn == ops.paintImageXObject || fn == ops.paintJpegXObject || fn == ops.paintInlineImageXObject || fn == ops.paintSolidColorImageMask) {
+            // PDF.js は細い罫線も単色の画像マスクへ最適化する。
+            let solid = fn == ops.paintSolidColorImageMask;
+            if (solid && isNearWhite(fillColor)) continue;
+            let object = transformBox(pageNumber, ctm, [0, 0, 1, 1], 0, solid ? "path" : "image");
             let visibleObject = object && clip ? intersectRectsLoose(object, clip) : object;
             if (object && visibleObject) {
                 graphics.push({...object, ...visibleObject});
@@ -2674,12 +2677,16 @@ function collectRegionBoundaries(
             headings.push(line);
             continue;
         }
-        if (!isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) || isEquationRelationLine(line, columnWidth)) continue;
+        if (isEquationRelationLine(line, columnWidth)) continue;
         let group = groups.find((group) => {
             let last = group[group.length - 1];
             return last.page == line.page && last.y - line.y < bodyFontSize * 1.9 &&
                 last.y > line.y && Math.abs(group[0].x - line.x) < bodyFontSize * 2;
         });
+        // 一語だけの段落末尾も、直前の本文と同じ位置・サイズなら境界に含める。
+        if (!isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) &&
+            !(group && group.length >= 2 && Math.abs(line.fontSize - bodyFontSize) < 0.8 &&
+                Math.abs(line.x - group[group.length - 1].x) < bodyFontSize * 0.5 && /^[A-Za-z].*[.!?]$/.test(line.text))) continue;
         if (group) group.push(line);
         else groups.push([line]);
     }
@@ -2892,15 +2899,25 @@ function collectFigureCandidates(
             let log = scanLoggerForCaption(options, candidate.node.str);
             let anchor = sourceRectFromLines(candidate.captionLines)!;
             let owner = regionColumnBounds(anchor, captions, bodyLayout, columnWidth, metric);
-            let direction: 1 | -1 = isTableCaption(candidate.node.str) ? -1 : 1;
+            let table = isTableCaption(candidate.node.str);
             let limits = boundaries.filter((block) => !candidate.captionLines.includes(block.lines[0])).map((block) => block.rect);
             limits.push(...captions.filter((other) => other !== candidate && isTableCaption(other.node.str) && other.node.rect).map((other) => other.node.rect!));
-            let bounds = boundRegionAtText(anchor, owner, direction, limits, bodyFontSize * 0.3);
-            log?.(`region: caption="${candidate.node.str}" owner=${fmtRect(owner)} bounds=${fmtRect(bounds)}`);
-            if (!bounds) continue;
-            let rect = fitRegionContent(mask, bounds, direction, bodyFontSize, bodyFontSize * (direction < 0 ? 0.7 : 4));
-            if (rect && rect.width >= 24 && rect.height >= 12) candidate.node.rect = rect;
-            log?.(`region: result ${fmtRect(rect)}`);
+            let directions: (1 | -1)[] = table ? [-1, 1] : [1];
+            let regions = directions.flatMap((direction) => {
+                let bounds = boundRegionAtText(anchor, owner, direction, limits, bodyFontSize * 0.3);
+                log?.(`region: caption="${candidate.node.str}" direction=${direction} owner=${fmtRect(owner)} bounds=${fmtRect(bounds)}`);
+                let rect = bounds && fitRegionContent(mask, bounds, direction, bodyFontSize, bodyFontSize * (table ? 0.7 : 4));
+                if (!rect || rect.width < 24 || rect.height < 12) return [];
+                // 上下どちらにも内容がある表は、キャプションに近い長い横罫線を優先する。
+                let ruleGap = Math.min(...pageGraphics.filter((graphic) => graphic.page == metric.page &&
+                    graphic.width > owner.width * 0.4 && graphic.height < bodyFontSize * 0.3 &&
+                    rectsOverlap(graphic, rect)).map((graphic) => direction > 0
+                        ? graphic.y - rectTop(anchor) : anchor.y - rectTop(graphic)));
+                return [{rect, ruleGap: ruleGap < bodyFontSize * 3 ? ruleGap : Infinity}];
+            });
+            regions.sort((a, b) => a.ruleGap - b.ruleGap);
+            candidate.node.rect = regions[0]?.rect;
+            log?.(`region: result ${fmtRect(candidate.node.rect ?? null)}`);
         }
     }
 

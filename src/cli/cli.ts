@@ -238,6 +238,7 @@ async function extractPDFFile(
         url: fileName,
         cMapPacked: true,
         cMapUrl: "node_modules/pdfjs-dist/cmaps/",
+        standardFontDataUrl: "node_modules/pdfjs-dist/standard_fonts/",
         verbosity: 0,
         ...(password !== undefined ? {password} : {})
     });
