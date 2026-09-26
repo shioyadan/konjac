@@ -201,33 +201,24 @@ async function attachNodeImages(nodes: PDF_Node[], pageProxies: any[]) {
     let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas | null>>();
 
     for (let node of nodes) {
-        if (
-            (node.type != PDF_NodeType.FIGURE && node.type != PDF_NodeType.EQUATION) ||
-            !node.rect
-        ) {
-            continue;
-        }
-
-        if (!pageCanvasPromises.has(node.rect.page)) {
-            let page = pageProxies[node.rect.page - 1];
-            if (!page) {
-                continue;
+        let images = [...(node.rect ? [node] : []),
+            ...(node.inlineImages ?? [])];
+        for (let image of images) {
+            let rect = image.rect!;
+            if (!pageCanvasPromises.has(rect.page)) {
+                let page = pageProxies[rect.page - 1];
+                if (!page) continue;
+                pageCanvasPromises.set(rect.page, renderPageCanvas(page));
             }
-            pageCanvasPromises.set(node.rect.page, renderPageCanvas(page));
-        }
-
-        let renderedPage = await pageCanvasPromises.get(node.rect.page);
-        if (renderedPage) {
-            node.imageSrc = cropRectFromPage(renderedPage, node.rect);
+            let renderedPage = await pageCanvasPromises.get(rect.page);
+            if (renderedPage) image.imageSrc = cropRectFromPage(renderedPage, rect);
         }
     }
 }
 
 function rememberPDFSource(element: HTMLElement, node: PDF_Node, pageProxies: any[]) {
     // 図表・数式は画像領域、それ以外は元テキスト領域を表示の中心にする。
-    let rect = node.type == PDF_NodeType.FIGURE || node.type == PDF_NodeType.EQUATION
-        ? node.rect ?? node.sourceRect
-        : node.sourceRect ?? node.rect;
+    let rect = node.rect ?? node.sourceRect;
     let page = rect ? pageProxies[rect.page - 1] : null;
     if (rect && page) {
         pdfSourceLocations.set(element, {page, rect});
@@ -294,9 +285,9 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
             main.appendChild(figure);
             continue;
         }
-        if (node.type == PDF_NodeType.EQUATION) {
+        if (node.type == PDF_NodeType.EQUATION || node.type == PDF_NodeType.BLOCK_IMAGE) {
             let figure = document.createElement("figure");
-            figure.className = "equation";
+            figure.className = node.type == PDF_NodeType.EQUATION ? "equation" : "block-image";
             figure.style.margin = "1rem 0";
             if (node.imageSrc) {
                 let image = document.createElement("img");
@@ -446,8 +437,10 @@ function translationDocument(): TranslationDocument {
         translationContext.sourceName,
         translationContext.fingerprint,
         translationContext.nodes,
-        (_node, nodeIndex) => translationElements.get(nodeIndex)
-            ?.querySelector<HTMLElement>(":scope > .translation-japanese")?.textContent ?? ""
+        (_node, nodeIndex) => {
+            let element = translationElements.get(nodeIndex)?.querySelector<HTMLElement>(":scope > .translation-japanese");
+            return element ? translatableText(element) : "";
+        }
     );
 }
 
@@ -589,6 +582,7 @@ function translatableElements() {
 function translatableText(element: HTMLElement) {
     let source = element.cloneNode(true) as HTMLElement;
     source.querySelectorAll("[data-export-exclude]").forEach((excluded) => excluded.remove());
+    source.querySelectorAll<HTMLImageElement>("img.inline-math").forEach((image) => image.replaceWith(document.createTextNode(image.dataset.math ?? image.alt)));
     return source.textContent?.trim() ?? "";
 }
 
@@ -1187,9 +1181,14 @@ function attachPDFSourceToggle(element: HTMLElement) {
 }
 
 function attachTranslation(element: HTMLElement, translatedText: string) {
+    let setContent = (target: HTMLElement, source: HTMLElement) => {
+        let images = new Map([...source.querySelectorAll<HTMLImageElement>("img.inline-math")].map((image) => [image.dataset.math, image]));
+        target.replaceChildren(...translatedText.split(/(⟦math-\d+-\d+⟧)/g)
+            .map((text) => images.get(text)?.cloneNode(true) ?? document.createTextNode(text)));
+    };
     let existing = element.querySelector<HTMLElement>(":scope > .translation-japanese");
     if (existing) {
-        existing.textContent = translatedText;
+        setContent(existing, element.querySelector<HTMLElement>(":scope > .translation-original") ?? element);
         element.lang = "ja";
         setElementOriginalVisible(element, false);
         return;
@@ -1210,7 +1209,7 @@ function attachTranslation(element: HTMLElement, translatedText: string) {
     let translated = document.createElement("span");
     translated.className = "translation-japanese";
     translated.lang = "ja";
-    translated.textContent = translatedText;
+    setContent(translated, original);
 
     let toggle = document.createElement("button");
     toggle.type = "button";
@@ -1285,7 +1284,9 @@ async function translateDocument() {
         for (let [index, element] of elements.entries()) {
             let sourceText = translatableText(element);
             try {
-                attachTranslation(element, await translator.translate(sourceText));
+                let segments = await Promise.all(sourceText.split(/(⟦math-\d+-\d+⟧)/g).map((text) =>
+                    /^⟦math-\d+-\d+⟧$/.test(text) || !text.trim() ? text : translator.translate(text)));
+                attachTranslation(element, segments.join(""));
             }
             catch (error) {
                 console.warn("Failed to translate a block", error);
@@ -1453,4 +1454,3 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
     enableTranslationJSON(sourceName, fingerprint, nodes);
     void enableTranslation();
 }
-

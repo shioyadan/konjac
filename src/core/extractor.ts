@@ -27,7 +27,9 @@ export enum PDF_NodeType {
     // 論文タイトル直下から抽出した著者名。
     AUTHOR = 7,
     // 著者名直下の所属・所在地・連絡先。
-    AFFILIATION = 8
+    AFFILIATION = 8,
+    // キャプションのない表・コードなど、行列の配置を画像で保持するブロック。
+    BLOCK_IMAGE = 9
 };
 
 // PDF ページ上の矩形。PDF.js の page.render で切り出すため、座標系は PDF と同じ左下原点。
@@ -73,6 +75,14 @@ export interface PDF_PageInput {
     height?: number;
 }
 
+export interface PDF_InlineImage {
+    marker: string;
+    rect: PDF_Rect;
+    fontSize: number;
+    baseline: number;
+    imageSrc?: string;
+}
+
 // HTML に変換する前の構造ノード。
 export class PDF_Node {
     // ノード内のプレーンテキスト。
@@ -85,6 +95,7 @@ export class PDF_Node {
     sourceRect?: PDF_Rect;
     // CLI/viewer が rect から生成した画像。extractor 自体は画像生成を行わない。
     imageSrc?: string;
+    inlineImages?: PDF_InlineImage[];
 
     constructor(str: string, type: PDF_NodeType, rect?: PDF_Rect, sourceRect?: PDF_Rect) {
         this.str = str;
@@ -112,8 +123,13 @@ export interface PDF_TextItemLike {
     width?: number;
     // 文字列の描画高さ。フォントサイズ推定のフォールバックに使う。
     height?: number;
-    // PDF.js が付けるフォント名。現状では保持のみで分類には使っていない。
+    // PDF.js が付けるフォント名。本文と数式の書体を区別する。
     fontName?: string;
+    monospace?: boolean;
+    fontAscent?: number;
+    // Unicode 対応を持たない描画文字は、実際の字形の範囲から画像として保持する。
+    inkRect?: PDF_Rect;
+    unmapped?: boolean;
 };
 
 // PDF.js の TextItem をページ座標付きの最小単位へ正規化したもの。
@@ -130,6 +146,12 @@ interface TextPart {
     width: number;
     // transform から推定したフォントサイズ。
     fontSize: number;
+    fontName?: string;
+    monospace?: boolean;
+    fontAscent?: number;
+    inkRect?: PDF_Rect;
+    unmapped?: boolean;
+    inlineImage?: PDF_InlineImage;
 }
 
 // 同じ y 座標付近にある TextPart を横方向に連結した 1 行。
@@ -193,13 +215,13 @@ interface FigureCandidate {
     node: PDF_Node;
 }
 
-// 右端の式番号を起点に、同じ表示数式へ属する行をまとめた候補。
-interface EquationCandidate {
-    // 読み順配列で最初に現れる数式行。
+// 同じ表示数式・表・コードへ属する行をまとめた候補。
+interface DisplayCandidate {
+    // 読み順配列で最初に現れる構成行。
     startIndex: number;
-    // 本文抽出から除外する、数式を構成する全行。
+    // 本文抽出から除外する全行。
     lineIndices: number[];
-    // PDF ページから切り出して表示する数式ノード。
+    // PDF ページから切り出して表示するノード。
     node: PDF_Node;
 }
 
@@ -508,6 +530,71 @@ async function renderPageInk(page: any, createCanvas: (width: number, height: nu
     return {width, height, cellSize, cells};
 }
 
+// Type3 の未対応文字は制御文字になり、幅が 0・高さがフォント全体の bbox になることがある。
+// 字形の描画範囲を使い、文字を推測せず元の画像を表示できるようにする。
+async function normalizeUnmappedGlyphs(page: any, items: PDF_TextItemLike[], ops: Record<string, number>) {
+    let names = new Set(items.filter((item) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(item.str ?? "")).map((item) => item.fontName));
+    if (!names.size || !page.commonObjs) return items;
+    let operatorList = await page.getOperatorList();
+    names = new Set([...names].filter((name) => name && page.commonObjs.get(name)?.isType3Font));
+    if (!names.size) return items;
+    let glyphItems: PDF_TextItemLike[] = [];
+    let incompleteFonts = new Set<string>();
+    let state = {ctm: asMatrix([1, 0, 0, 1, 0, 0]), matrix: asMatrix([1, 0, 0, 1, 0, 0]), x: 0, y: 0, lineX: 0, lineY: 0,
+        fontName: "", fontSize: 0, hScale: 1, rise: 0, leading: 0, charSpace: 0, wordSpace: 0};
+    let stack: typeof state[] = [];
+    let move = (x: number, y: number) => { state.x = state.lineX += x; state.y = state.lineY += y; };
+    for (let i = 0; i < operatorList.fnArray.length; i++) {
+        let fn = operatorList.fnArray[i], args = operatorList.argsArray[i] ?? [];
+        if (fn == ops.save) stack.push({...state});
+        else if (fn == ops.restore) state = stack.pop() ?? state;
+        else if (fn == ops.transform) state.ctm = multiplyMatrix(state.ctm, asMatrix(args));
+        else if (fn == ops.paintFormXObjectBegin) {
+            stack.push({...state});
+            if (args[0]) state.ctm = multiplyMatrix(state.ctm, asMatrix(args[0]));
+        }
+        else if (fn == ops.paintFormXObjectEnd) state = stack.pop() ?? state;
+        else if (fn == ops.beginText) { state.matrix = asMatrix([1, 0, 0, 1, 0, 0]); state.x = state.y = state.lineX = state.lineY = 0; }
+        else if (fn == ops.setTextMatrix) { state.matrix = asMatrix(args); state.x = state.y = state.lineX = state.lineY = 0; }
+        else if (fn == ops.setFont) { state.fontName = args[0]; state.fontSize = args[1]; }
+        else if (fn == ops.setGState) {
+            for (let [key, value] of args[0]) if (key == "Font") { state.fontName = value[0]; state.fontSize = value[1]; }
+        }
+        else if (fn == ops.setHScale) state.hScale = args[0] / 100;
+        else if (fn == ops.setTextRise) state.rise = args[0];
+        else if (fn == ops.setCharSpacing) state.charSpace = args[0];
+        else if (fn == ops.setWordSpacing) state.wordSpace = args[0];
+        else if (fn == ops.setLeading) state.leading = args[0];
+        else if (fn == ops.moveText) move(args[0], args[1]);
+        else if (fn == ops.setLeadingMoveText) { state.leading = -args[1]; move(args[0], args[1]); }
+        else if (fn == ops.nextLine) move(0, -state.leading);
+        else if (fn == ops.showText) {
+            let font = page.commonObjs.get(state.fontName), fm = asMatrix(font.fontMatrix ?? [0.001, 0, 0, 0.001, 0, 0]);
+            for (let glyph of args[0]) {
+                if (typeof glyph == "number") { state.x -= glyph * state.fontSize * state.hScale / 1000; continue; }
+                if (names.has(state.fontName)) {
+                    let list = font.charProcOperatorList[glyph.operatorListId];
+                    let index = list?.fnArray.indexOf(ops.setCharWidthAndBounds) ?? -1;
+                    if (index >= 0) {
+                        let matrix = multiplyMatrix(multiplyMatrix(state.ctm, state.matrix),
+                            [state.fontSize * state.hScale, 0, 0, state.fontSize, state.x, state.y + state.rise]);
+                        let rect = transformBox(0, multiplyMatrix(matrix, fm), list.argsArray[index].slice(2), 0, "path");
+                        if (rect && rect.width > 0 && rect.height > 0) glyphItems.push({str: "�", unmapped: true,
+                            fontName: state.fontName, inkRect: rect, width: rect.width,
+                            transform: [rect.height, 0, 0, rect.height, rect.x, rect.y]});
+                    }
+                    // 幅だけの空白は無視できるが、bbox のない描画文字を落としてはならない。
+                    else if (!list || list.fnArray.some((fn: number) => fn != ops.setCharWidth)) incompleteFonts.add(state.fontName);
+                }
+                state.x += (glyph.width * fm[0] * state.fontSize + state.charSpace + (glyph.isSpace ? state.wordSpace : 0)) * state.hScale;
+            }
+        }
+    }
+    glyphItems = glyphItems.filter((item) => !incompleteFonts.has(item.fontName!));
+    let recovered = new Set(glyphItems.map((item) => item.fontName));
+    return [...items.filter((item) => !recovered.has(item.fontName)), ...glyphItems];
+}
+
 // CLI/viewer からは TextContent と Graphics を別々に扱わず、ページ入力としてまとめて渡す。
 export async function extractPageInputFromPDFPage(
     page: any, pageNumber: number, ops: Record<string, number>,
@@ -518,12 +605,17 @@ export async function extractPageInputFromPDFPage(
         page.getTextContent(),
         extractGraphicsFromPage(page, pageNumber, ops)
     ]);
+    let items = await normalizeUnmappedGlyphs(page, textContent.items, ops);
 
     // CropBox の移動とページ回転を、描画時と同じページ座標へ正規化する。
     let pageTransform = multiplyMatrix([1, 0, 0, -1, 0, viewport.height], asMatrix(viewport.transform));
     let input: PDF_PageInput = {
-        items: textContent.items.map((item: PDF_TextItemLike) => item.transform ? {
-            ...item, transform: multiplyMatrix(pageTransform, asMatrix(item.transform))
+        items: items.map((item: PDF_TextItemLike) => item.transform ? {
+            ...item, transform: multiplyMatrix(pageTransform, asMatrix(item.transform)),
+            monospace: textContent.styles?.[item.fontName ?? ""]?.fontFamily == "monospace",
+            fontAscent: textContent.styles?.[item.fontName ?? ""]?.ascent,
+            ...(item.inkRect ? {inkRect: transformBox(pageNumber, pageTransform,
+                [item.inkRect.x, item.inkRect.y, item.inkRect.x + item.inkRect.width, item.inkRect.y + item.inkRect.height], 0, "path")!} : {})
         } : item),
         graphics: graphics.map((graphic) => ({
             ...graphic,
@@ -541,7 +633,7 @@ export async function extractPageInputFromPDFPage(
 }
 
 // PDF.js の transform から文字列、座標、フォントサイズを取り出す。
-function textItemToPart(textItemArg: unknown, page: number) {
+function textItemToPart(textItemArg: unknown, page: number): TextPart | null {
     let textItem = textItemArg as PDF_TextItemLike;
     if (typeof textItem.str != "string" || textItem.str.trim() == "") {
         return null;
@@ -560,7 +652,12 @@ function textItemToPart(textItemArg: unknown, page: number) {
         x: transform[4] ?? 0,
         y: transform[5] ?? 0,
         width: textItem.width ?? 0,
-        fontSize
+        fontSize,
+        fontName: textItem.fontName,
+        monospace: textItem.monospace,
+        fontAscent: textItem.fontAscent,
+        inkRect: textItem.inkRect,
+        unmapped: textItem.unmapped
     };
 }
 
@@ -818,6 +915,21 @@ function isPageDecoration(line: TextLine, metric?: PageMetrics) {
         /^Date of publication\b/.test(text) ||
         /^\d{1,2}\s+[A-Z][a-z]+\s+\d{4}\.?$/.test(text)
     );
+}
+
+// ページ端の同じ位置で繰り返す柱・ページ番号・フッターは、図表の内容に含めない。
+function repeatedPageDecorations(lines: TextLine[], metrics: Map<number, PageMetrics>, bodyFontSize: number) {
+    let candidates = lines.filter((line) => {
+        let metric = metrics.get(line.page)!;
+        return (line.y > metric.height * 0.88 || line.y < metric.height * 0.09) &&
+            (Math.abs(line.x - metric.minX) < bodyFontSize || Math.abs(line.x + line.width - metric.maxX) < bodyFontSize) &&
+            !lines.some((other) => other.page == line.page && (line.y > metric.height / 2
+                ? other.y > line.y + bodyFontSize : other.y < line.y - bodyFontSize));
+    });
+    let key = (line: TextLine) => line.text.replace(/\d+/g, "#");
+    return new Set(candidates.filter((line) => new Set(candidates.filter((other) =>
+        key(other) == key(line) && Math.abs(other.y - line.y) < bodyFontSize * 0.5 &&
+        Math.abs(other.x - line.x) < bodyFontSize).map((other) => other.page)).size >= 3));
 }
 
 const CAPTION_NUMBER_PATTERN = "(?:\\d+(?:\\.\\d+)*|[IVXLCDM]+)";
@@ -1470,7 +1582,7 @@ function splitMergedColumnLines(lines: TextLine[]) {
     return result;
 }
 
-// 2 段組み論文を想定し、ページごとに左カラム、右カラムの順へ並べる。
+// 単段は上から下へ、2 段組みは左カラム、右カラムの順へ並べる。
 function sortLinesForReading(lines: TextLine[]) {
     let result: TextLine[] = [];
     let pages = [...new Set(lines.map((line) => line.page))].sort((a, b) => a - b);
@@ -1478,9 +1590,16 @@ function sortLinesForReading(lines: TextLine[]) {
     for (let page of pages) {
         let pageLines = lines.filter((line) => line.page == page);
         let centerX = estimateColumnSplitX(pageLines);
+        let byY = (a: TextLine, b: TextLine) => b.y - a.y || a.x - b.x;
+        let span = Math.max(...pageLines.map((line) => line.x + line.width)) - Math.min(...pageLines.map((line) => line.x));
+        // 図だけのページは短いキャプションしかないため、幅の広い本文がある場合に単段と確定する。
+        let wideBody = pageLines.some((line) => line.width > span * 0.7 && line.text.length > 55 && !isMathFragment(line.text));
+        if (wideBody && !pageLooksTwoColumn(pageLines, centerX)) {
+            result.push(...pageLines.sort(byY));
+            continue;
+        }
         let left = pageLines.filter((line) => line.x < centerX);
         let right = pageLines.filter((line) => line.x >= centerX);
-        let byY = (a: TextLine, b: TextLine) => b.y - a.y || a.x - b.x;
 
         result.push(...left.sort(byY), ...right.sort(byY));
     }
@@ -1983,7 +2102,8 @@ function usefulGraphicObject(graphic: PDF_GraphicObject, metric: PageMetrics) {
         return rectArea(graphic) >= 16;
     }
 
-    return rectArea(graphic) >= 6 || Math.max(graphic.width, graphic.height) >= 10;
+    // アウトライン化された文字の末尾や句読点も、小さな描画パスとして保持する。
+    return true;
 }
 
 // ページ全面が1枚の画像で、その上にOCRテキストだけが重なっているPDFかを判定する。
@@ -1997,6 +2117,7 @@ function hasFullPageImage(graphics: PDF_GraphicObject[], metric: PageMetrics) {
 }
 
 function lineRect(line: TextLine): PDF_Rect {
+    if (line.parts.every((part) => part.inkRect)) return unionRects(line.parts.map((part) => part.inkRect!))!;
     return {
         page: line.page,
         x: line.x,
@@ -2035,7 +2156,7 @@ function isBodyLayoutLine(
     bodyFontSize: number,
     columnWidth: number
 ) {
-    if (!bodyLayout || line.fontSize < bodyFontSize - 1.2 || line.fontSize > bodyFontSize + 1.2) {
+    if (!bodyLayout || Math.abs(lineDominantFontSize(line) - bodyFontSize) > 1.2) {
         return false;
     }
 
@@ -2576,7 +2697,7 @@ function collectRegionBoundaries(
             headings.push(line);
             continue;
         }
-        if (isEquationRelationLine(line, columnWidth)) continue;
+        if (isDisplayMathLine(line, columnWidth)) continue;
         let group = groups.find((group) => {
             let last = group[group.length - 1];
             return last.page == line.page && last.y - line.y < bodyFontSize * 1.9 &&
@@ -2584,14 +2705,19 @@ function collectRegionBoundaries(
         });
         // 一語だけの段落末尾も、直前の本文と同じ位置・サイズなら境界に含める。
         if (!isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth) &&
-            !(group && group.length >= 2 && Math.abs(line.fontSize - bodyFontSize) < 0.8 &&
-                Math.abs(line.x - group[group.length - 1].x) < bodyFontSize * 0.5 && /^[A-Za-z].*[.!?]$/.test(line.text))) continue;
+            !(line.width > columnWidth * 0.7 && Math.abs(lineDominantFontSize(line) - bodyFontSize) < 0.8 && !isMathFragment(line.text)) &&
+            !(group && (group.length >= 2 || !isMathFragment(group[0].text)) && Math.abs(line.fontSize - bodyFontSize) < 0.8 &&
+                Math.abs(line.x - group[group.length - 1].x) < bodyFontSize * 0.5 && /^[A-Za-z].*[.!?:]$/.test(line.text))) continue;
         if (group) group.push(line);
         else groups.push([line]);
     }
     for (let group of groups) {
-        if (group.length >= 2 && group.some((line) => line.width > columnWidth * 0.7) && group.reduce((sum, line) => sum + line.text.length, 0) > 70) {
-            blocks.push({kind: "body", rect: sourceRectFromLines(group)!, lines: group});
+        // 一行でも明らかな説明文は境界にする。幅のある複数セルは表の行として残す。
+        if (group.some((line) => line.width > columnWidth * 0.7) &&
+            (group.length >= 2 && group.reduce((sum, line) => sum + line.text.length, 0) > 70 ||
+                group.some((line) => !isMathFragment(line.text) && line.text.length > 55 &&
+                    tableTextRows([line], bodyFontSize)[0]?.cells.filter((cell) => cell.width > bodyFontSize * 2).length < 2))) {
+            blocks.push({kind: "body", rect: sourceRectFromLines(group.map((line) => ({...line, fontSize: lineDominantFontSize(line)})))!, lines: group});
         }
     }
     for (let line of headings) {
@@ -2617,8 +2743,9 @@ function regionColumnBounds(
     if (anchor.width < columnWidth * 1.2 && Math.abs(center - metric.width / 2) > columnWidth * 0.18) {
         let starts: number[] = [];
         // 一方が図だけの段でも、本文側の段位置を残してキャプション側と組み合わせる。
-        for (let xs of [columns.map((column) => column.x), captions.map((caption) => caption.captionLines[0].x),
-            layout.columns.map((column) => column.x)]) {
+        let fallbackStarts = [layout.columns.map((column) => column.x), captions.map((caption) => caption.captionLines[0].x)];
+        if (!columns.length) fallbackStarts.reverse();
+        for (let xs of [columns.map((column) => column.x), ...fallbackStarts]) {
             starts = [...starts, ...xs].sort((a, b) => a - b)
                 .filter((x, i, all) => i == 0 || x - all[i - 1] > columnWidth * 0.6);
             if (starts.length >= 2) break;
@@ -2676,9 +2803,11 @@ function tableTextRows(lines: TextLine[], bodyFontSize: number) {
 // 2列以上の左端・右端・中央が繰り返しそろう区間だけ、広い行間をつなぐ。
 function tableRowSpans(rows: ReturnType<typeof tableTextRows>, bodyFontSize: number) {
     let spans: PDF_Rect[] = [];
+    // 複数の小表に分かれていても、途中の一列見出しを挟んで列の整列を比較する。
+    rows = rows.filter((row) => row.cells.length >= 2);
     for (let i = 1; i < rows.length; i++) {
         let a = rows[i - 1], b = rows[i];
-        if (a.y - b.y > bodyFontSize * 4) continue;
+        if (a.y - b.y > bodyFontSize * 5) continue;
         let cursor = 0, matched = 0;
         for (let cell of a.cells) {
             let index = b.cells.findIndex((other, j) => j >= cursor &&
@@ -2854,40 +2983,91 @@ function isEquationRelationLine(line: TextLine, columnWidth: number) {
         /(?:=|[≤≥≠≈≃≡×÷∫∑∏√⊕⊗∧∨˄˅])/.test(line.text);
 }
 
-// 本文と隣接する式番号を境界に、上下の式行・添字・罫線を一つの領域へまとめる。
-function collectEquationCandidates(
+// 本文と隣接する式番号を境界に、数式・無題の表・コードを配置ごと保持する。
+function collectDisplayCandidates(
     lines: TextLine[], bodyFontSize: number, columnWidth: number,
     pageMetrics: Map<number, PageMetrics>, bodyLayout: BodyLayoutModel,
     excludedRects: PDF_Rect[], boundaries: RegionBoundary[], graphics: PDF_GraphicObject[]
 ) {
-    let candidates: EquationCandidate[] = [];
+    let candidates: DisplayCandidate[] = [];
     let used = new Set<number>();
+    // 短い説明文でも、本文の左端と書体で始まる単語を数式の境界にする。
+    // 数式中の英単語だけで判断すると、変数名や場合分けまで本文になってしまう。
+    let fonts = new Map<string, number>();
+    for (let block of boundaries.filter((block) => block.kind == "body")) {
+        for (let part of block.lines.flatMap((line) => line.parts)) {
+            if (part.fontName && /[A-Za-z]{3,}/.test(part.text)) {
+                fonts.set(part.fontName, (fonts.get(part.fontName) ?? 0) + part.width);
+            }
+        }
+    }
+    let bodyFont = [...fonts].sort((a, b) => b[1] - a[1])[0]?.[0];
+    // 本文中の識別子は除き、行全体が別書体の等幅文字である部分をコード候補にする。
+    let fixedLines = new Set(lines.filter((line) => line.parts.every((part) => part.monospace && part.fontName != bodyFont)));
+    boundaries = boundaries.flatMap((block) => block.kind == "body" && block.lines.some((line) => fixedLines.has(line))
+        ? block.lines.filter((line) => !fixedLines.has(line)).map((line) => ({...block, lines: [line], rect: sourceRectFromLines([line])!}))
+        : [block]);
     let blockedLines = new Set(boundaries.flatMap((block) => block.lines));
+    for (let line of lines) {
+        let first = line.parts.find((part) => part.fontName == bodyFont && /^[A-Za-z][a-z]+\b/.test(part.text));
+        if (blockedLines.has(line) || !bodyFont || !first || first !== line.parts[0] && isMathFragment(line.text)) continue;
+        let column = bodyLayout.columns.find((column) => column.page == line.page && Math.abs(column.x - line.x) < bodyFontSize * 0.5);
+        if (!column || excludedRects.some((rect) => lineCenterInsideRect(line, rect))) continue;
+        let row = lines.filter((other) => other.page == line.page && Math.abs(other.y - line.y) < bodyFontSize * 0.5 &&
+            other.x >= column.x - bodyFontSize * 0.5 && other.x + other.width <= column.x + columnWidth + bodyFontSize);
+        let rect = sourceRectFromLines(row.map((other) => ({...other, fontSize: lineDominantFontSize(other)})));
+        if (rect) {
+            boundaries.push({kind: "body", rect, lines: row});
+            for (let other of row) blockedLines.add(other);
+        }
+    }
     let available = lines.map((line, index) => ({line, index})).filter(({line}) =>
         !blockedLines.has(line) && !excludedRects.some((rect) => lineCenterInsideRect(line, rect))
     );
+    let columns = bodyLayout.columns.filter((column) => !bodyLayout.columns.some((other) => other.page == column.page &&
+        other.x < column.x && column.x - other.x < columnWidth * 0.5));
+    let gridLines = new Set<TextLine>();
+    for (let column of columns) {
+        let rows = tableTextRows(available.map(({line}) => line).filter((line) => line.page == column.page &&
+            line.x >= column.x && line.x + line.width <= column.x + columnWidth + bodyFontSize), bodyFontSize);
+        // 記号もキャプションもない小表は、短いセルが3行以上、同じ列に並ぶことを起点にする。
+        for (let i = 2; i < rows.length; i++) {
+            let group = rows.slice(i - 2, i + 1);
+            if (group.some((row) => row.cells.length < 3 || row.lines.some((line) => !isMathFragment(line.text))) ||
+                group[0].y - group[2].y > bodyFontSize * 4 || tableRowSpans(group, bodyFontSize).length < 2) continue;
+            for (let row of group) for (let line of row.lines) gridLines.add(line);
+        }
+    }
     let anchors = available.flatMap((entry) => {
         let {line} = entry, edge = equationNumberEdge(line);
-        if (!edge && !isDisplayMathLine(line, columnWidth)) return [];
-        let columns = bodyLayout.columns.filter((column) => column.page == line.page);
+        let fixedCode = fixedLines.has(line) && /^(?:export\s+\w|[A-Za-z_]\w*\s*=|--?[A-Za-z])/.test(line.text);
+        if (!edge && !fixedCode && !isDisplayMathLine(line, columnWidth) && !gridLines.has(line) && !isCodeStatement(line.text)) return [];
         let distance = (column: BodyColumnModel) => Math.min(
             edge != "right" ? Math.abs(line.x - column.x) : Infinity,
             edge != "left" ? Math.abs(line.x + line.width - column.x - columnWidth) : Infinity);
-        let column = columns.filter((column) => edge ? distance(column) < columnWidth * 0.3 :
-            line.x >= column.x - bodyFontSize && line.x + line.width <= column.x + columnWidth + bodyFontSize)
+        let column = columns.filter((column) => column.page == line.page && (edge ? distance(column) < columnWidth * 0.3 :
+            line.x >= column.x - bodyFontSize && line.x + line.width <= column.x + columnWidth + bodyFontSize))
             .sort((a, b) => distance(a) - distance(b))[0];
-        return column ? [{...entry, column, numbered: edge != null}] : [];
+        return column ? [{...entry, column, numbered: edge != null, fixedCode}] : [];
     });
     // 番号付きのまとまりを先に確定し、その残りから番号なしの独立数式を拾う。
-    anchors.sort((a, b) => Number(b.numbered) - Number(a.numbered));
+    anchors.sort((a, b) => Number(b.numbered) - Number(a.numbered) || Number(b.fixedCode) - Number(a.fixedCode));
     for (let anchor of anchors) {
         if (used.has(anchor.index)) continue;
-        let {numbered, column} = anchor;
+        let {numbered, column, fixedCode} = anchor;
         let metric = pageMetrics.get(anchor.line.page)!;
         let owner = {page: anchor.line.page, x: column.x - bodyFontSize * 0.6, y: 0,
             width: columnWidth + bodyFontSize * 1.8, height: metric.height};
-        let anchorRect = lineRect(anchor.line);
-        let blockers = [...boundaries.map((block) => block.rect), ...excludedRects];
+        if (boundaries.some((block) => block.kind == "body" && block.rect.page == owner.page &&
+            anchor.line.y >= block.rect.y && anchor.line.y <= rectTop(block.rect) &&
+            block.rect.x < rectRight(owner) && rectRight(block.rect) > owner.x)) continue;
+        // 数式フォントの高さが過大なPDFでも直前の本文を越えないよう、baselineで上下を分ける。
+        let anchorRect = {...lineRect(anchor.line), y: anchor.line.y, height: 0};
+        // 密なコード行の descender を次の本文の概算 bbox で切らないよう、書体の ascent を使う。
+        let blockers = [...boundaries.map((block) => fixedCode && block.kind == "body"
+            ? {...block.rect, height: Math.max(...block.lines.flatMap((line) => line.parts.map((part) =>
+                part.y + part.fontSize * (part.fontAscent ?? 1)))) - block.rect.y}
+            : block.rect), ...excludedRects];
         let above = boundRegionAtText(anchorRect, owner, 1, blockers, 0);
         let below = boundRegionAtText(anchorRect, owner, -1, blockers, 0);
         if (!above || !below) continue;
@@ -2900,6 +3080,7 @@ function collectEquationCandidates(
         }
         let bounds = {...owner, y: bottom, height: top - bottom};
         let nearby = available.filter(({line, index}) => !used.has(index) && line.page == bounds.page &&
+            (!fixedCode || fixedLines.has(line) && line.parts[0].fontName == anchor.line.parts[0].fontName) &&
             line.y >= bottom && line.y <= top && line.x + line.width / 2 >= bounds.x && line.x + line.width / 2 <= rectRight(bounds));
         let members = new Set([anchor.index]);
         let rect = lineRect(anchor.line);
@@ -2918,17 +3099,20 @@ function collectEquationCandidates(
             }
         }
         let sourceLines = [...members].map((index) => lines[index]);
+        let code = fixedCode || sourceLines.some((line) => isCodeStatement(line.text));
+        let grid = sourceLines.some((line) => gridLines.has(line));
         // 番号だけ、通常の文章、箇条書きを数式画像にしない。記号がなくても式本体は拾う。
         let content = sourceLines.map((line) => line.text.replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "")
             .replace(/^\s*\(\d+(?:\.\d+)*[a-z]?\)|\(\d+(?:\.\d+)*[a-z]?\)\s*$/g, "").trim()).filter(Boolean);
-        if (!content.length || (!sourceLines.some((line) => isEquationRelationLine(line, columnWidth)) &&
+        if (!content.length || (!code && !grid && !sourceLines.some((line) => isEquationRelationLine(line, columnWidth) || line.parts.some((part) => part.unmapped)) &&
             (content.some((text) => !isMathFragment(text) || isListItemStart(text)) ||
                 !content.some((text) => /[\p{Sm}\d]|(?:^|\s)\p{L}(?:\s|$)/u.test(text))))) continue;
         if (!numbered) {
-            // 本文中の式や箇条書きの誤検出を避け、字下げと上下の余白がある式だけを採用する。
-            if (rect.x < column.x + bodyFontSize * 0.8 || rect.width > columnWidth * 0.95 ||
-                rect.y - bottom < bodyFontSize * 0.6 || top - rectTop(rect) < bodyFontSize * 0.6 ||
-                sourceLines.some((line) => !isMathFragment(line.text) || isListItemStart(line.text) || /^[\s\u0000-\u001f]*[●◦▪\uf0b7]/.test(line.text))) continue;
+            // 本文との境界は共有の bounds に任せ、字下げと式の内容を確認する。
+            let drawnMath = rect.width > columnWidth * 0.3 && sourceLines.every((line) => line.parts.every((part) => part.unmapped));
+            if (!fixedCode && !drawnMath && rect.x < column.x + bodyFontSize * 0.8 || rect.width < bodyFontSize * 2 || rect.width > columnWidth * 1.05 ||
+                !fixedCode && sourceLines.some((line) => !(code && /^\s*\/\//.test(line.text)) && (!isMathFragment(line.text) || isListItemStart(line.text) ||
+                    /^[\s\u0000-\u001f]*[●◦▪\uf0b7]/.test(line.text)))) continue;
         }
         let sourceRect = sourceRectFromLines(sourceLines)!;
         let decorations = graphics.filter((graphic) => graphic.page == rect.page && graphic.kind == "path" &&
@@ -2940,9 +3124,13 @@ function collectEquationCandidates(
         for (let index of members) used.add(index);
         candidates.push({startIndex: Math.min(...members), lineIndices: [...members],
             node: new PDF_Node(sourceLines.sort((a, b) => b.y - a.y || a.x - b.x).map((line) => line.text).join(" "),
-                PDF_NodeType.EQUATION, rect, sourceRect)});
+                code || grid ? PDF_NodeType.BLOCK_IMAGE : PDF_NodeType.EQUATION, rect, sourceRect)});
     }
     return candidates;
+}
+
+function isCodeStatement(text: string) {
+    return /^(?:if|for|while|switch)\s*\(.*[;{}]/.test(text);
 }
 
 function isMathFragment(text: string) {
@@ -2952,7 +3140,7 @@ function isMathFragment(text: string) {
 }
 
 function isDisplayMathLine(line: TextLine, columnWidth: number) {
-    return isEquationRelationLine(line, columnWidth) && isMathFragment(line.text);
+    return (isEquationRelationLine(line, columnWidth) || line.parts.some((part) => part.unmapped)) && isMathFragment(line.text);
 }
 
 function unionRects(rects: PDF_Rect[]): PDF_Rect | null {
@@ -2975,6 +3163,102 @@ function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
         centerY >= rect.y &&
         centerY <= rect.y + rect.height
     );
+}
+
+// 本文の行を復元し、分数・添字・Unicode のない文字を行内の画像として保持する。
+function restoreInlineContent(
+    lines: TextLine[], reserved: Set<TextLine>, bodyFontSize: number, columnWidth: number,
+    layout: BodyLayoutModel, metrics: Map<number, PageMetrics>, excluded: PDF_Rect[], nextMarker: (page: number) => string
+) {
+    let available = lines.filter((line) => !reserved.has(line) && !excluded.some((rect) => lineCenterInsideRect(line, rect)));
+    let sourceLines = new Map(available.flatMap((line) => line.parts.map((part) => [part, line] as const)));
+    let parts = available.flatMap((line) => line.parts);
+    let columns = layout.columns.filter((column) => !layout.columns.some((other) => other.page == column.page &&
+        other.x < column.x && column.x - other.x < columnWidth * 0.5));
+    let rows: {page: number; x: number; y: number; parts: TextPart[]; words: Set<TextPart>}[] = [];
+    for (let part of parts) {
+        if (part.unmapped || !/(?:[A-Za-z]{2,}|^[.,;:!?]$)/.test(part.text) ||
+            Math.abs(part.fontSize - bodyFontSize) > bodyFontSize * 0.15) continue;
+        let column = columns.filter((column) => column.page == part.page &&
+            part.x >= column.x - bodyFontSize && part.x + part.width <= column.x + columnWidth + bodyFontSize)
+            .sort((a, b) => a.x - b.x)[0];
+        if (!column) continue;
+        let row = rows.find((row) => row.page == part.page && Math.abs(row.y - part.y) < bodyFontSize * 0.2 && Math.abs(row.x - column.x) < bodyFontSize);
+        if (!row) rows.push(row = {page: part.page, x: column.x, y: part.y, parts: [], words: new Set()});
+        row.words.add(part);
+    }
+    let owners = new Map<TextPart, typeof rows[number]>();
+    for (let part of parts) {
+        let y = part.inkRect ? part.inkRect.y + part.inkRect.height / 2 - bodyFontSize * 0.3 : part.y;
+        let row = rows.filter((row) => row.page == part.page && part.x >= row.x - bodyFontSize * 1.5 &&
+            part.x + part.width <= row.x + columnWidth + bodyFontSize && Math.abs(y - row.y) < bodyFontSize * 1.1)
+            .sort((a, b) => Math.abs(a.y - y) - Math.abs(b.y - y))[0];
+        if (row) { row.parts.push(part); owners.set(part, row); }
+    }
+    let replacements = new Map<typeof rows[number], TextLine>();
+    for (let row of rows) {
+        let ordered = row.parts.sort((a, b) => a.x - b.x || b.y - a.y), result: TextPart[] = [];
+        for (let i = 0; i < ordered.length;) {
+            let first = ordered[i];
+            if (row.words.has(first)) { result.push(first); i++; continue; }
+            let run = [first], right = first.x + first.width;
+            let j = i + 1;
+            while (j < ordered.length && !row.words.has(ordered[j]) && ordered[j].x - right < bodyFontSize * 1.5) {
+                run.push(ordered[j]); right = Math.max(right, ordered[j].x + ordered[j].width); j++;
+            }
+            if (run.some((part) => part.unmapped || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(part.text) ||
+                Math.abs(part.y - row.y) > bodyFontSize * 0.12 && (part.fontSize < bodyFontSize * 0.9 || /[∫∑√]/.test(part.text)))) {
+                let ink = unionRects(run.flatMap((part) => part.inkRect ? [part.inkRect] : []));
+                let rect = unionRects(run.map((part) => part.inkRect ??
+                    {page: part.page, x: part.x, y: part.y - part.fontSize * 0.2, width: part.width, height: part.fontSize * 1.05}))!;
+                rect = expandRect(rect, bodyFontSize * 0.08, metrics.get(row.page)!);
+                let neighbors = [...rows.filter((other) => other !== row && other.page == row.page && other.x == row.x)
+                    .map((other) => ({page: other.page, x: other.x, y: other.y - bodyFontSize * 0.3, width: columnWidth, height: bodyFontSize * 1.15})), ...excluded];
+                for (let neighbor of neighbors.filter((other) => other.page == rect.page && other.x < rectRight(rect) && rectRight(other) > rect.x)) {
+                    if (neighbor.y > row.y + bodyFontSize * 0.3) {
+                        rect.height = Math.min(rectTop(rect), Math.max(neighbor.y, ink ? rectTop(ink) : -Infinity)) - rect.y;
+                    }
+                    if (rectTop(neighbor) < row.y - bodyFontSize * 0.3) {
+                        let top = rectTop(rect); rect.y = Math.max(rect.y, Math.min(rectTop(neighbor), ink?.y ?? Infinity)); rect.height = top - rect.y;
+                    }
+                }
+                let image = {marker: nextMarker(row.page), rect, fontSize: bodyFontSize, baseline: row.y};
+                result.push({...first, text: image.marker, x: rect.x, y: row.y, width: rect.width,
+                    fontSize: bodyFontSize, unmapped: false, inkRect: rect, inlineImage: image});
+            }
+            else result.push(...run);
+            i = j;
+        }
+        let line = partsToLine(result);
+        // OCR の baseline 差や両端揃えの広い空白で割れた本文を、同じ列の x 順へ戻す。
+        let fragmentedProse = row.words.size >= 2 && (line?.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 4 &&
+            new Set(ordered.map((part) => sourceLines.get(part))).size > 1 &&
+            ordered.every((part, i) => i == 0 || part.x - ordered[i - 1].x - ordered[i - 1].width < bodyFontSize ||
+                part.fontName == ordered[i - 1].fontName && Math.abs(part.y - ordered[i - 1].y) < LINE_Y_EPSILON);
+        if (line && (fragmentedProse || result.some((part) => part.inlineImage))) replacements.set(row, {...line, y: row.y, fontSize: bodyFontSize});
+    }
+    let emitted = new Set<typeof rows[number]>();
+    return lines.flatMap((line) => {
+        if (!available.includes(line)) return [line];
+        if (!line.parts.some((part) => part.unmapped || replacements.has(owners.get(part)!))) return [line];
+        let result: TextLine[] = [], remaining: TextPart[] = [];
+        for (let part of line.parts) {
+            let row = owners.get(part);
+            if (!row || !replacements.has(row)) { remaining.push(part); continue; }
+            if (!emitted.has(row) && line.parts.some((part) => row.words.has(part))) {
+                result.push(replacements.get(row)!); emitted.add(row);
+            }
+        }
+        remaining = remaining.map((part) => {
+            if (!part.unmapped || !part.inkRect) return part;
+            let rect = expandRect(part.inkRect, bodyFontSize * 0.08, metrics.get(part.page)!);
+            let image = {marker: nextMarker(part.page), rect, fontSize: bodyFontSize, baseline: part.y};
+            return {...part, text: image.marker, inlineImage: image, fontSize: bodyFontSize, unmapped: false};
+        });
+        let rest = partsToLine(remaining);
+        if (rest) result.push(rest);
+        return result;
+    });
 }
 
 // 抽出の中心処理。ページごとの TextItem から、タイトル・見出し・本文・図表を作る。
@@ -3009,7 +3293,8 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let figureColumnWidth = Math.max(columnWidth, Math.min(pageColumnWidth, 280));
 
     // 行単位の前処理: 見出し分割とページ番号除去を行う。小さい図表内テキストは矩形推定で使うため残す。
-    lines = splitCaptionLines(splitHeadingLines(lines, bodyFontSize))
+    let decorations = repeatedPageDecorations(lines, pageMetrics, bodyFontSize);
+    lines = splitCaptionLines(splitHeadingLines(lines.filter((line) => !decorations.has(line)), bodyFontSize))
         .filter((line) => line.text != "")
         .filter((line) => !isPageDecoration(line, pageMetrics.get(line.page)));
     lines = normalizeDropCaps(lines, bodyFontSize);
@@ -3022,8 +3307,8 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let readingLines = sortLinesForReading(lines);
     let {figures, boundaries, masks} = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics, bodyLayout, options, new Map(pages.flatMap((page, i) => !Array.isArray(page) && page.ink ? [[i + 1, page.ink] as const] : [])), metadata);
     emitDebugMasks(options, pageMetrics, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout, masks);
-    let figureByStart = new Map(figures.map((figure) => [figure.startIndex, figure]));
-    let captionLineIndices = new Set<number>();
+    let figureByStart = new Map(figures.map((figure) => [readingLines[figure.startIndex], figure]));
+    let captionLines = new Set<TextLine>();
     let figureRects = figures
         .map((figure) => figure.node.rect)
         .filter((rect): rect is PDF_Rect => rect != null);
@@ -3031,12 +3316,12 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     // 複数行キャプションは FIGURE ノードにまとめるので、元の行は本文候補から外す。
     for (let figure of figures) {
         for (let i = figure.startIndex; i <= figure.endIndex; i++) {
-            captionLineIndices.add(i);
+            captionLines.add(readingLines[i]);
         }
     }
 
-    // 図表領域を除外してから番号付き数式を集め、本文中の壊れた数式断片と置き換える。
-    let equations = collectEquationCandidates(
+    // 図表以外の独立ブロックを先に確定し、残りの本文行を復元する。
+    let displays = collectDisplayCandidates(
         readingLines,
         bodyFontSize,
         columnWidth,
@@ -3046,8 +3331,26 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         boundaries,
         graphics
     );
-    let equationByStart = new Map(equations.map((equation) => [equation.startIndex, equation]));
-    let equationLineIndices = new Set(equations.flatMap((equation) => equation.lineIndices));
+    let displayByStart = new Map(displays.map((display) => [readingLines[display.startIndex], display]));
+    let displayLines = new Set(displays.flatMap((display) => display.lineIndices.map((index) => readingLines[index])));
+    let mathSequence = 0;
+    let nextMathMarker = (page: number) => `⟦math-${page}-${++mathSequence}⟧`;
+    readingLines = restoreInlineContent(readingLines, new Set([...captionLines, ...displayLines, ...metadata.ignoredLines,
+        ...metadata.titleLines, ...metadata.authorLines, ...metadata.affiliationLines,
+        ...readingLines.filter((line) => isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize))]), bodyFontSize, columnWidth, bodyLayout, pageMetrics,
+        [...figureRects, ...displays.map((display) => display.node.rect!)], nextMathMarker);
+    for (let figure of figures) {
+        let rect = sourceRectFromLines(figure.captionLines)!;
+        let fontSize = median(figure.captionLines.map(lineDominantFontSize), bodyFontSize);
+        let captionLines = restoreInlineContent(figure.captionLines, new Set(), fontSize, rect.width,
+            {columns: [{page: rect.page, x: rect.x, yStep: fontSize * 1.2, baselines: figure.captionLines.map((line) => line.y)}]},
+            pageMetrics, figureRects, nextMathMarker);
+        let images = captionLines.flatMap((line) => line.parts.flatMap((part) => part.inlineImage ? [part.inlineImage] : []));
+        if (images.length) {
+            figure.node.str = captionLines.reduce((text, line) => appendLineText(text, line.text), "");
+            figure.node.inlineImages = images;
+        }
+    }
 
     let nodes: PDF_Node[] = [];
     if (metadata.titleLines.length > 0) {
@@ -3106,7 +3409,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     for (let i = 0; i < readingLines.length; i++) {
         let line = readingLines[i];
         let relaxedHeading = rasterPages.has(line.page);
-        let figure = figureByStart.get(i);
+        let figure = figureByStart.get(line);
         if (figure) {
             flushTitle();
             flushParagraph();
@@ -3115,11 +3418,11 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             continue;
         }
 
-        let equation = equationByStart.get(i);
-        if (equation) {
+        let display = displayByStart.get(line);
+        if (display) {
             flushTitle();
             flushParagraph();
-            nodes.push(equation.node);
+            nodes.push(display.node);
             prevTextLine = null;
             continue;
         }
@@ -3130,8 +3433,8 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         }
 
         if (
-            captionLineIndices.has(i) ||
-            equationLineIndices.has(i) ||
+            captionLines.has(line) ||
+            displayLines.has(line) ||
             figureRects.some((rect) => lineCenterInsideRect(line, rect))
         ) {
             prevTextLine = null;
@@ -3169,8 +3472,8 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             if (
                 relaxedHeading &&
                 nextLine &&
-                !figureByStart.has(i + 1) &&
-                !captionLineIndices.has(i + 1) &&
+                !figureByStart.has(nextLine) &&
+                !captionLines.has(nextLine) &&
                 isSameLineHeadingContinuation(line, nextLine, bodyFontSize)
             ) {
                 heading = appendLineText(heading, nextLine.text);
@@ -3194,7 +3497,14 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
 
     flushTitle();
     flushParagraph();
-    return mergeAdjacentTextFragments(moveInterruptedFiguresAfterParagraphs(nodes), columnWidth);
+    let result = mergeAdjacentTextFragments(moveInterruptedFiguresAfterParagraphs(nodes), columnWidth);
+    let images = [...readingLines.flatMap((line) => line.parts.flatMap((part) => part.inlineImage ? [part.inlineImage] : [])),
+        ...figures.flatMap((figure) => figure.node.inlineImages ?? [])];
+    for (let node of result) {
+        let used = images.filter((image) => node.str.includes(image.marker));
+        if (used.length) node.inlineImages = used;
+    }
+    return result;
 }
 
 // 旧 API 互換: 1 ページ分の TextItem だけから抽出する。
@@ -3374,7 +3684,14 @@ export function linkedNodeHTML(node: PDF_Node, context: HTMLLinkContext) {
         offset = index + text.length;
     }
 
-    return html + escapeHTML(node.str.slice(offset));
+    html += escapeHTML(node.str.slice(offset));
+    for (let image of node.inlineImages ?? []) {
+        if (!image.imageSrc) continue;
+        let style = `display: inline-block; margin: 0; width: ${image.rect.width / image.fontSize}em; height: ${image.rect.height / image.fontSize}em; ` +
+            `vertical-align: ${(image.rect.y - image.baseline) / image.fontSize}em;`;
+        html = html.split(image.marker).join(`<img class="inline-math" src="${escapeHTML(image.imageSrc)}" alt="Formula" data-math="${image.marker}" style="${style}">`);
+    }
+    return html;
 }
 
 // 連続する中黒付き本文だけを HTML の itemize へ変換するため、表示する項目本文を取り出す。
@@ -3401,6 +3718,7 @@ export function nodeToHTMLElementName(node: PDF_Node) {
             return "figcaption";
         case PDF_NodeType.FIGURE:
         case PDF_NodeType.EQUATION:
+        case PDF_NodeType.BLOCK_IMAGE:
             return "figure";
         default:
             return "p";
@@ -3463,13 +3781,13 @@ export function nodesToHTML(nodes: PDF_Node[], structureNodes: PDF_Node[] = node
             body.push(`<figure${idAttr}>${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption></figure>`);
             continue;
         }
-        if (node.type == PDF_NodeType.EQUATION) {
+        if (node.type == PDF_NodeType.EQUATION || node.type == PDF_NodeType.BLOCK_IMAGE) {
             let imageWidth = figureImageDisplayWidth(node.rect);
             let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
             let image = node.imageSrc
                 ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
                 : escapeHTML(node.str);
-            body.push(`<figure class="equation"${idAttr}>${image}</figure>`);
+            body.push(`<figure class="${node.type == PDF_NodeType.EQUATION ? "equation" : "block-image"}"${idAttr}>${image}</figure>`);
             continue;
         }
 

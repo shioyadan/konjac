@@ -199,24 +199,17 @@ async function attachNodeImages(nodes: PDF_Node[], pageProxies: any[]) {
     let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas>>();
 
     for (let node of nodes) {
-        if (
-            (node.type != PDF_NodeType.FIGURE && node.type != PDF_NodeType.EQUATION) ||
-            !node.rect
-        ) {
-            continue;
-        }
-
-        if (!pageCanvasPromises.has(node.rect.page)) {
-            let page = pageProxies[node.rect.page - 1];
-            if (!page) {
-                continue;
+        let images = [...(node.rect ? [node] : []),
+            ...(node.inlineImages ?? [])];
+        for (let image of images) {
+            let rect = image.rect!;
+            if (!pageCanvasPromises.has(rect.page)) {
+                let page = pageProxies[rect.page - 1];
+                if (!page) continue;
+                pageCanvasPromises.set(rect.page, renderPageCanvas(page));
             }
-            pageCanvasPromises.set(node.rect.page, renderPageCanvas(page));
-        }
-
-        let renderedPage = await pageCanvasPromises.get(node.rect.page);
-        if (renderedPage) {
-            node.imageSrc = cropRectFromPage(renderedPage, node.rect);
+            let renderedPage = await pageCanvasPromises.get(rect.page);
+            if (renderedPage) image.imageSrc = cropRectFromPage(renderedPage, rect);
         }
     }
 }

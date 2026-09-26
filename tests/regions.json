@@ -10,12 +10,19 @@
     ]
   },
   "test3": {
-    "figures": 10, "equations": 0,
+    "figures": 10, "equations": 0, "blocks": 5,
+    "prose": ["First, the environment variable of XOS MMM L ARENA LOCK TYPE was not set.",
+      "Normal runs at 2.0 GHz without eco mode.", "Boost runs at 2.2 GHz without eco mode."],
     "regions": [
       {"caption": "Figure 1.", "page": 1, "content": [319, 470, 233, 116], "exclude": [[440, 640]]},
       {"caption": "Figure 2.", "page": 5, "content": [64, 280, 230, 438]},
       {"caption": "Figure 3.", "page": 5, "content": [324, 280, 230, 438]},
-      {"caption": "TABLE 4.", "page": 6, "content": [72, 544, 463, 155]}
+      {"caption": "TABLE 4.", "page": 6, "content": [72, 544, 463, 155]},
+      {"blockIndex": 1, "page": 3, "content": [61.5, 365, 201, 127], "exclude": [[150, 497], [150, 362]]},
+      {"blockIndex": 2, "page": 3, "content": [61.5, 279, 195, 30], "exclude": [[150, 316], [150, 275]]},
+      {"blockIndex": 1, "page": 5, "content": [317, 198, 223, 17], "exclude": [[420, 222], [420, 190]]},
+      {"blockIndex": 1, "page": 7, "content": [315, 667, 211, 39], "exclude": [[440, 715], [440, 650]]},
+      {"blockIndex": 2, "page": 7, "content": [315, 547, 228, 18], "exclude": [[440, 574], [440, 530]]}
     ]
   },
   "test4": {
@@ -68,6 +75,7 @@
   },
   "test8": {
     "figures": 10, "equations": 0,
+    "prose": ["exponent difference, and in some designs, a zero detect on the output of the top 52-bit incrementer."],
     "headings": ["V. RESULTS", "VI. CONCLUSION", "ACKNOWLEDGEMENTS", "REFERENCES"],
     "regions": [
       {"caption": "Figure 1.", "page": 2, "content": [325, 436, 225, 277], "exclude": [[150, 530]]},
@@ -147,6 +155,79 @@
       {"caption": "Figure 8.", "page": 7, "content": [64, 540, 230, 173], "exclude": [[175, 522], [430, 620]]},
       {"caption": "Figure 9.", "page": 7, "content": [64, 347, 223, 138], "exclude": [[175, 328], [175, 523], [430, 425]]},
       {"caption": "Figure 10.", "page": 7, "content": [65, 149, 225, 151], "exclude": [[175, 126], [175, 328], [430, 240]]}
+    ]
+  },
+  "test13": {
+    "figures": 16, "equations": 10, "blocks": 3, "readableMath": true,
+    "regions": [
+      {"caption": "Fig. 1.", "page": 3, "content": [94, 98, 292, 538], "exclude": [[100, 660], [200, 83]]},
+      {"caption": "Fig. 2.", "page": 5, "content": [124, 472, 236, 164], "exclude": [[100, 660], [200, 455]]},
+      {"caption": "Fig. 3.", "page": 7, "content": [128, 504, 228, 132], "exclude": [[100, 660], [200, 485]]},
+      {"equationIndex": 1, "page": 7, "content": [56, 207, 332, 35], "exclude": [[200, 256], [200, 196]]},
+      {"caption": "Fig. 4.", "page": 8, "content": [100, 613, 284, 24], "exclude": [[200, 595]]},
+      {"equationIndex": 1, "page": 9, "content": [133, 332, 220, 28], "exclude": [[200, 369], [200, 319]]},
+      {"equationIndex": 2, "page": 9, "content": [178, 285, 125, 23], "exclude": [[200, 319], [200, 266]]},
+      {"equationIndex": 3, "page": 9, "content": [156, 207, 173, 30], "exclude": [[200, 242], [200, 194]]},
+      {"equation": "1", "page": 9, "content": [201, 131, 236, 17], "exclude": [[220, 160], [220, 119]]},
+      {"inline": true, "page": 9, "content": [82, 315, 106, 14], "exclude": [[200, 319], [150, 340]]},
+      {"inline": true, "page": 9, "content": [94, 264, 86, 14], "exclude": [[200, 266], [150, 290]]},
+      {"inline": true, "page": 9, "content": [224, 166, 48, 12], "exclude": [[200, 171], [260, 186]]},
+      {"caption": "Table 1.", "page": 10, "content": [64, 492, 358, 120], "exclude": [[200, 634], [200, 477]]},
+      {"equationIndex": 1, "page": 10, "content": [192, 284, 102, 35], "exclude": [[240, 326], [240, 271]]},
+      {"equationIndex": 2, "page": 10, "content": [196, 191, 94, 35], "exclude": [[240, 236], [240, 178]]},
+      {"equationIndex": 3, "page": 10, "content": [147, 147, 191, 23], "exclude": [[240, 178], [240, 135]]},
+      {"equationIndex": 4, "page": 10, "content": [195, 114, 96, 11], "exclude": [[240, 135], [240, 97]]},
+      {"caption": "Table 2.", "page": 11, "content": [140, 574, 206, 36], "exclude": [[200, 554]]},
+      {"caption": "Fig. 5.", "page": 12, "content": [124, 512, 236, 124], "exclude": [[200, 493]]},
+      {"blockIndex": 1, "page": 12, "content": [166, 338, 153, 44], "exclude": [[200, 398], [200, 316]]},
+      {"blockIndex": 2, "page": 12, "content": [102, 248, 148, 54], "exclude": [[130, 317], [180, 225], [200, 339]]},
+      {"caption": "Table 3.", "page": 13, "content": [48, 442, 390, 178], "exclude": [[200, 633], [200, 420]]},
+      {"blockIndex": 1, "page": 13, "content": [158, 361, 86, 20], "exclude": [[180, 392], [180, 342]]},
+      {"caption": "Fig. 6.", "page": 15, "content": [118, 470, 251, 166], "exclude": [[100, 660], [200, 451]]},
+      {"equationIndex": 1, "page": 15, "content": [192, 386, 103, 24], "exclude": [[50, 420], [200, 373]]},
+      {"caption": "Fig. 7.", "page": 16, "content": [128, 470, 230, 166], "exclude": [[200, 450], [200, 380]]},
+      {"caption": "Table 4.", "page": 16, "content": [110, 356, 264, 36], "exclude": [[200, 410], [200, 326]]},
+      {"caption": "Table 5.", "page": 17, "content": [78, 584, 330, 36], "exclude": [[200, 633], [200, 540]]},
+      {"caption": "Fig. 8.", "page": 17, "content": [128, 389, 230, 167], "exclude": [[200, 600], [200, 370]]},
+      {"caption": "Fig. 9.", "page": 18, "content": [126, 470, 234, 166], "exclude": [[200, 452], [200, 430]]},
+      {"caption": "Fig. 10.", "page": 19, "content": [128, 470, 230, 166], "exclude": [[100, 660], [200, 450], [200, 410]]},
+      {"caption": "Fig. 11.", "page": 19, "content": [124, 400, 232, 24], "exclude": [[200, 380], [200, 360]]}
+    ]
+  },
+  "test14": {
+    "figures": 14, "equations": 9, "readableMath": true,
+    "regions": [
+      {"caption": "Table 1:", "page": 2, "content": [363, 644, 164, 89], "exclude": [[450, 630]]},
+      {"caption": "Table 2:", "page": 3, "content": [62, 504, 239, 217], "exclude": [[180, 488], [330, 660]]},
+      {"caption": "Figure 1:", "page": 4, "content": [90, 452, 479, 253], "exclude": [[300, 436], [300, 350]]},
+      {"caption": "Figure 2:", "page": 4, "content": [90, 116, 479, 253], "exclude": [[300, 100], [300, 480]]},
+      {"caption": "Figure 3:", "page": 5, "content": [67, 501, 232, 174], "exclude": [[328, 650], [180, 480]]},
+      {"caption": "Figure 4:", "page": 5, "content": [68, 162, 231, 171], "exclude": [[327, 250], [180, 144]]},
+      {"equationIndex": 1, "page": 5, "content": [332, 497, 227, 18], "exclude": [[420, 528], [420, 484], [180, 510]]},
+      {"equationIndex": 2, "page": 5, "content": [350, 441, 190, 19], "exclude": [[420, 477], [420, 425], [180, 450]]},
+      {"equationIndex": 3, "page": 5, "content": [350, 408, 190, 19], "exclude": [[420, 445], [420, 389], [180, 420]]},
+      {"equationIndex": 4, "page": 5, "content": [350, 375, 190, 19], "exclude": [[420, 411], [420, 363], [180, 390]]},
+      {"inline": true, "page": 5, "content": [356, 585, 93, 8], "exclude": [[330, 586], [460, 586], [400, 598]]},
+      {"inline": true, "page": 5, "content": [534, 577, 9, 6], "exclude": [[520, 577], [548, 577]]},
+      {"caption": "Figure 5:", "page": 6, "content": [88, 452, 481, 253], "exclude": [[300, 436], [300, 350]]},
+      {"caption": "Figure 6:", "page": 6, "content": [88, 116, 481, 253], "exclude": [[300, 100], [300, 480]]},
+      {"caption": "Figure 7:", "page": 7, "content": [88, 480, 480, 253], "exclude": [[300, 464], [180, 430]]},
+      {"caption": "Figure 8:", "page": 8, "content": [88, 480, 481, 253], "exclude": [[300, 464], [180, 430]]},
+      {"equation": "1", "page": 8, "content": [142, 344, 158, 16], "exclude": [[180, 375], [180, 333]]},
+      {"equation": "2", "page": 8, "content": [153, 306, 147, 17], "exclude": [[180, 333], [180, 295]]},
+      {"equation": "3", "page": 8, "content": [377, 292, 186, 36], "exclude": [[440, 340], [440, 274]]},
+      {"equation": "4", "page": 8, "content": [365, 249, 198, 8], "exclude": [[440, 274], [440, 241]]},
+      {"equationIndex": 5, "page": 8, "content": [398, 190, 94, 32], "exclude": [[440, 229], [440, 180]]},
+      {"inline": true, "page": 8, "content": [144, 86, 41, 9.5], "exclude": [[130, 88], [200, 88], [170, 78]]},
+      {"inline": true, "page": 8, "content": [144, 66, 80, 9.5], "exclude": [[120, 68], [240, 68], [170, 80]]},
+      {"inline": true, "page": 8, "content": [406, 391, 158, 9.5], "exclude": [[390, 393], [430, 406]]},
+      {"inline": true, "page": 8, "content": [325.5, 237, 15, 7], "exclude": [[350, 238], [340, 254]]},
+      {"inline": true, "page": 8, "content": [460, 75, 6, 10], "exclude": [[440, 78], [480, 78], [465, 90]]},
+      {"caption": "Figure 9:", "page": 9, "content": [63, 589, 192, 148], "exclude": [[180, 575], [330, 660]]},
+      {"caption": "Figure 10:", "page": 9, "content": [63, 411, 194, 148], "exclude": [[180, 397], [330, 510]]},
+      {"inline": true, "page": 9, "content": [387.5, 147, 38, 6.5], "exclude": [[375, 150], [440, 150], [400, 160]]},
+      {"caption": "Figure 11:", "page": 10, "content": [88, 480, 478, 253], "exclude": [[300, 464], [180, 430]]},
+      {"caption": "Figure 12:", "page": 11, "content": [88, 480, 480, 253], "exclude": [[300, 464], [180, 430]]}
     ]
   }
 }

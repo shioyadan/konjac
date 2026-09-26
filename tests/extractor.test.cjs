@@ -31,6 +31,13 @@ test('stacked panels stay together and stop at the body block', () => {
     assert.ok(top(figure.rect) < 680);
 });
 
+test('small outlined glyphs at the edge of a diagram remain in the crop', () => {
+    const glyph = shape(278, 580, 1.9, 2.8);
+    const nodes = extract([...paragraph(40, 710), ...paragraph(40, 330),
+        text('Figure 1. Diagram with outlined text.', 40, 390, 230, 9)], [shape(55, 430, 210, 180), glyph]);
+    assert.ok(encloses(figures(nodes)[0].rect, glyph));
+});
+
 test('adjacent captions own separate figures', () => {
     const panels = [shape(50, 430, 210, 180), shape(330, 430, 210, 180)];
     const nodes = extract([...paragraph(40, 710), ...paragraph(320, 710), ...paragraph(40, 330), ...paragraph(320, 330),
@@ -117,6 +124,50 @@ test('unnumbered display math is recovered, inline prose and lists are preserved
     assert.equal(eq.length, 1);
     assert.ok(eq[0].str.includes('x = a + b'));
     assert.ok(!eq[0].str.includes('ordinary prose'));
+});
+
+test('single-column reading order keeps right-hand fragments before following prose', () => {
+    const nodes = extract([...paragraph(40, 750).map((item) => ({...item, width: 400})),
+        text('left fragment', 100, 660, 90), text('right fragment', 350, 660, 80),
+        text('Following prose describes the result in a single column.', 40, 620, 400)]);
+    const output = nodes.map((node) => node.str).join(' ');
+    assert.ok(output.indexOf('right fragment') < output.indexOf('Following prose'));
+});
+
+test('sparse columns of figures keep caption continuation in its column', () => {
+    const nodes = extract([text('Figure 1. The left diagram and its', 40, 400, 210, 9),
+        text('continued description.', 40, 389, 150, 9),
+        text('Figure 2. The right diagram.', 320, 399, 200, 9)],
+        [shape(50, 450, 210, 150), shape(330, 450, 210, 150)]);
+    assert.ok(figures(nodes).find((node) => node.str.startsWith('Figure 1.')).str.endsWith('continued description.'));
+});
+
+test('short prose in the body font separates adjacent unnumbered fractions', () => {
+    const font = (item, fontName) => ({...item, fontName});
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 580)].map((item) => font(item, 'body')).concat([
+        font(text('a', 155, 685, 10), 'math'), font(text('u =', 100, 678, 30), 'math'),
+        font(text('b', 155, 671, 10), 'math'),
+        font(text('As', 40, 650, 10), 'body'), font(text('p = q', 55, 650, 40), 'math'),
+        font(text(', we obtain', 115, 650, 55), 'body'),
+        font(text('c', 155, 631, 10), 'math'), font(text('v =', 100, 624, 30), 'math'),
+        font(text('d', 155, 617, 10), 'math')
+    ]));
+    const eq = equations(nodes);
+    assert.equal(eq.length, 2);
+    assert.ok(eq[0].str.includes('u =') && eq[1].str.includes('v ='));
+    assert.ok(eq[0].rect.y > 660 && top(eq[1].rect) < 648);
+    assert.ok(nodes.some((node) => node.type === 1 && node.str.includes('we obtain')));
+});
+
+test('unnumbered integrals can touch estimated body bounds without absorbing prose', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 660),
+        text('∫', 115, 713, 8), text('1', 128, 710, 5, 7),
+        text('m =', 85, 699, 25), text('f(x) dx =', 138, 699, 55),
+        text('a', 205, 706, 8), text('b', 205, 691, 8), text('0', 124, 688, 5, 7)]);
+    const [eq] = equations(nodes);
+    assert.equal(equations(nodes).length, 1);
+    assert.ok(eq.str.includes('∫') && eq.str.includes('0') && eq.str.includes('b'));
+    assert.ok(top(eq.rect) <= 720 && eq.rect.y > 670);
 });
 
 test('zero in a case expression and fraction rules remain inside the equation', () => {
@@ -212,15 +263,74 @@ test('caption wrapping uses layout and stops before a new paragraph', () => {
     assert.equal(figure.str, 'Figure 1. Two panels are shown. The upper panel is the baseline.');
 });
 
+test('repeated running headers and footers stay out of figures and prose', () => {
+    const pages = [{width: 600, height: 800, items: paragraph(40, 700)}];
+    for (let page = 2; page <= 4; page++) pages.push({width: 600, height: 800,
+        items: [text('A running journal title', 40, 755, 180), text(`30:${page}`, 260, 755, 20),
+            text('Repeated journal footer', 40, 40, 240, 8), ...paragraph(40, 400),
+            text(`Figure ${page}. A plot.`, 40, 470, 230, 9)],
+        graphics: [{...shape(55, 500, 210, 230), page}]});
+    const nodes = extractNodesFromPages(pages);
+    assert.equal(figures(nodes).length, 3);
+    assert.ok(figures(nodes).every((n) => top(n.rect) < 745 && encloses(n.rect, {x: 55, y: 500, width: 210, height: 230})));
+    assert.ok(nodes.every((n) => !/running journal|journal footer|30:/.test(n.str)));
+});
+
+test('single prose lines containing inline math bound a numbered equation', () => {
+    const before = 'The equation x = y explains the result that we derive below.';
+    const after = 'The result a = b is used to calculate the following measurements.';
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540), text(before, 40, 685, 240),
+        text('x = a + b', 100, 660, 120), text('(1)', 265, 660, 15), text(after, 40, 640, 240)]);
+    const [eq] = equations(nodes);
+    assert.equal(equations(nodes).length, 1);
+    assert.ok(!eq.str.includes('result'));
+    assert.ok(top(eq.rect) < 683 && eq.rect.y > 650);
+    assert.ok(nodes.some((n) => n.type === 1 && n.str.includes(before)));
+    assert.ok(nodes.some((n) => n.type === 1 && n.str.includes(after)));
+});
+
+test('unmapped math glyphs do not pull a short prose ending into the crop', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('The mathematical expression for the following prediction result', 40, 680, 240), text('is:', 40, 666, 10),
+        text('\u0002E, *\u00042, *\u0001', 120, 656, 100, 20.5), text('(1)', 265, 656, 15),
+        text('The resulting probability is used in the following measurements.', 40, 636, 240)]);
+    const [eq] = equations(nodes);
+    assert.equal(equations(nodes).length, 1);
+    assert.ok(!eq.str.includes('is:'));
+    assert.ok(top(eq.rect) <= 663.5 && eq.rect.y >= 646);
+});
+
+test('a long multi-cell table row is not a standalone prose boundary', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        ...tableRow(685, 0, 10), ...tableRow(665, 1, 10),
+        text('memory fence', 50, 645, 55), text('scalar-vector, vector-scalar, vector-vector', 130, 645, 150),
+        text('Table 1. Instructions.', 40, 620, 230, 9)]);
+    const [table] = figures(nodes);
+    assert.ok(table.rect && encloses(table.rect, {x: 50, y: 645, width: 230, height: 50}));
+});
+
+test('stacked table sections stay together across a spanning header', () => {
+    const nodes = extract([...paragraph(40, 770), ...paragraph(40, 470),
+        ...tableRow(710, 0), ...tableRow(690, 1), ...tableRow(670, 2),
+        text('Second group', 130, 640, 80, 8), ...tableRow(626, 0), ...tableRow(606, 1), ...tableRow(586, 2),
+        text('Table 1. Measurements.', 40, 560, 230, 9)]);
+    const [table] = figures(nodes);
+    assert.ok(encloses(table.rect, {x: 50, y: 586, width: 215, height: 132}));
+    assert.ok(table.rect.y > 570 && top(table.rect) < 740);
+});
+
 test('CropBox translation is applied to both text and drawings', async () => {
     const page = {
         getViewport: () => ({width: 594, height: 774, transform: [1, 0, 0, -1, -36, 810]}),
-        getTextContent: async () => ({items: [text('sample', 70, 100, 30)]}),
+        getTextContent: async () => ({items: [{...text('sample', 70, 100, 30), fontName: 'mono'}],
+            styles: {mono: {fontFamily: 'monospace', ascent: .727}}}),
         getOperatorList: async () => ({fnArray: [1, 2], argsArray: [[[0], [70, 100, 90, 120], [70, 100, 90, 120]], []]})
     };
     const result = await extractPageInputFromPDFPage(page, 1, {constructPath: 1, fill: 2});
     assert.equal(result.items[0].transform[4], 34);
     assert.equal(result.items[0].transform[5], 64);
+    assert.equal(result.items[0].monospace, true);
+    assert.equal(result.items[0].fontAscent, .727);
     assert.ok(Math.abs(result.graphics[0].x - 33.5) < .01);
     assert.ok(Math.abs(result.graphics[0].y - 63.5) < .01);
 });
@@ -296,4 +406,174 @@ test('small page decorations containing math-like punctuation stay out of prose'
         text('Conference publication information | copyright and document identifier', 10, 625, 400, 6),
         text('∗', 120, 610, 5, 6)]);
     assert.ok(nodes.every((node) => !node.str.includes('publication information') && !node.str.includes('∗')));
+});
+
+test('unmapped Type3 glyphs use their painted boxes and TJ spacing', async () => {
+    const ops = {beginText: 1, setTextMatrix: 2, setFont: 3, showText: 4, setCharWidthAndBounds: 5};
+    const font = {isType3Font: true, fontMatrix: [1, 0, 0, 1, 0, 0], bbox: [0, -5, 10, 60],
+        charProcOperatorList: {a: {fnArray: [5], argsArray: [[0, 0, 0, 0, 6, 8]]}, space: {fnArray: [], argsArray: []}}};
+    const page = {
+        getViewport: () => ({width: 600, height: 800, transform: [1, 0, 0, -1, 0, 800]}),
+        getTextContent: async () => ({items: [{...text('\u0001\u0001', 40, 700, 0, 65), fontName: 'math'}]}),
+        commonObjs: {get: () => font},
+        getOperatorList: async () => ({fnArray: [1, 2, 3, 4], argsArray: [[], [1, 0, 0, 1, 40, 700], ['math', 1],
+            [[{operatorListId: 'a', width: 0}, {operatorListId: 'space', width: 0}, -12000, {operatorListId: 'a', width: 0}]]]})
+    };
+    const input = await extractPageInputFromPDFPage(page, 1, ops);
+    assert.equal(input.items.length, 2);
+    assert.deepEqual(input.items.map((item) => [item.inkRect.x, item.inkRect.y, item.inkRect.width, item.inkRect.height]),
+        [[40, 700, 6, 8], [52, 700, 6, 8]]);
+    assert.ok(input.items.every((item) => item.unmapped));
+    font.charProcOperatorList.space = {fnArray: [999], argsArray: [[]]};
+    const incomplete = await extractPageInputFromPDFPage(page, 1, ops);
+    assert.equal(incomplete.items[0].str, '\u0001\u0001', 'unsupported drawings preserve the original text instead of dropping glyphs');
+});
+
+const painted = (x, y, width, height) => ({...text('�', x, y, width, height), unmapped: true,
+    inkRect: {page: 2, x, y, width, height}});
+
+test('inline fractions remain between prose and retain superscripts in the image', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('With probability', 40, 650, 70), painted(115, 650, 8, 7),
+        painted(125, 654, 6, 5), painted(125, 643, 6, 5),
+        text('the condition holds.', 140, 650, 140)]);
+    const node = nodes.find((node) => node.str.includes('With probability'));
+    assert.equal(equations(nodes).length, 0);
+    assert.equal(node.inlineImages?.length, 1);
+    const image = node.inlineImages[0];
+    assert.ok(node.str.indexOf('With probability') < node.str.indexOf(image.marker));
+    assert.ok(node.str.indexOf(image.marker) < node.str.indexOf('the condition holds'));
+    assert.ok(encloses(image.rect, {page: 2, x: 115, y: 643, width: 16, height: 16}));
+    assert.ok(right(image.rect) < 140);
+});
+
+test('a wrapped formula followed by a period stays before the following sentence', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('The first probability is smaller than', 40, 660, 240),
+        painted(40, 646, 8, 7), painted(49, 645, 4, 4), text('.', 56, 646, 3),
+        text('Two situations can occur in this example.', 40, 632, 240)]);
+    const output = nodes.map((node) => node.str).join(' ');
+    const image = nodes.flatMap((node) => node.inlineImages ?? [])[0];
+    assert.ok(image);
+    assert.ok(output.indexOf(image.marker) < output.indexOf('Two situations'));
+    assert.ok(!output.includes('�'));
+});
+
+test('inline crop padding never clips a known superscript near the preceding row', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('A short preceding line.', 40, 660, 90),
+        text('With probability', 40, 650, 70), painted(115, 650, 8, 7), painted(124, 655, 4, 4),
+        text('the condition holds.', 140, 650, 140)]);
+    const node = nodes.find((node) => node.str.includes('With probability'));
+    assert.ok(encloses(node.inlineImages[0].rect, {x: 115, y: 650, width: 13, height: 9}));
+});
+
+test('inline formulas survive translation and HTML escapes adjacent translated prose', () => {
+    const code = ts.transpileModule(readFileSync('src/core/translation.ts', 'utf8'), {
+        compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}
+    }).outputText;
+    const translation = {};
+    new Function('exports', 'require', code)(translation, () => engine.exports);
+    const marker = '⟦math-2-1⟧';
+    const node = new engine.exports.PDF_Node(`The probability is ${marker}.`, 1);
+    node.inlineImages = [{marker, rect: {page: 2, x: 50, y: 650, width: 20, height: 12},
+        fontSize: 10, baseline: 653, imageSrc: 'data:image/png;base64,AA=='}];
+    const doc = translation.createTranslationDocument('sample.pdf', 'sample', [node]);
+    assert.ok(doc.instructions.includes('marker'));
+    const translated = translation.translatedNodesFromEntries([{nodeIndex: 0, block: {...doc.blocks[0], translation: `<value> ${marker}`}}], [node]);
+    const html = engine.exports.nodesToHTML(translated, [node]);
+    assert.match(html, /&lt;value&gt;/);
+    assert.match(html, /class="inline-math"/);
+    assert.match(html, /vertical-align: -0.3em/);
+    assert.ok(!html.includes(`<value>`));
+    assert.equal(node.str, `The probability is ${marker}.`);
+});
+
+test('an uncaptioned numeric grid stays in one block with its row labels and rule', () => {
+    const cells = [680, 666, 652, 638].flatMap((y, row) => [100, 140, 180, 220].map((x, col) =>
+        text(col ? String(row + col) : ['x', 'a', 'b', 'c'][row], x, y, 6)));
+    const nodes = extract([...paragraph(40, 750), ...cells, ...paragraph(40, 590)], [shape(98, 675, 132, .5)]);
+    const blocks = nodes.filter((node) => node.type === 9);
+    assert.equal(blocks.length, 1);
+    assert.ok(encloses(blocks[0].rect, {x: 98, y: 638, width: 132, height: 52}));
+    assert.equal(equations(nodes).length, 0);
+    assert.ok(nodes.filter((node) => node.type === 1).every((node) => node.str.length > 8));
+});
+
+test('indented code keeps assignments, braces, subscripts, and comments in one image', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 590),
+        text('j = count', 80, 680, 50), text('for (i = count; i >= 0; i--) {', 80, 666, 160),
+        text('if (a < b) j = i;', 90, 652, 90), text('}', 80, 638, 6),
+        text('// return the selected entry', 80, 624, 150)]);
+    const [block] = nodes.filter((node) => node.type === 9);
+    assert.ok(block && encloses(block.rect, {x: 80, y: 624, width: 160, height: 66}));
+    assert.ok(!nodes.filter((node) => node.type === 1).some((node) => node.str.includes('return the selected')));
+    block.imageSrc = 'data:image/png;base64,AA==';
+    assert.match(engine.exports.nodesToHTML(nodes), /<figure class="block-image"><img/);
+});
+
+test('short prose and bullet lists do not become uncaptioned grids', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('Yes.', 100, 680, 20), text('No.', 100, 666, 20), text('Maybe.', 100, 652, 35),
+        text('• Red', 100, 620, 40), text('• Green', 100, 606, 40), text('• Blue', 100, 592, 40)]);
+    assert.ok(nodes.every((node) => node.type !== 9));
+});
+
+test('OCR fragments on one prose baseline are joined in horizontal order', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(320, 750), ...paragraph(40, 540), ...paragraph(320, 540),
+        text('The left column has its own baseline.', 40, 652, 240),
+        text('The complete', 320, 650.1, 60), text('sentence has', 385, 649.7, 60),
+        text('the correct', 450, 650.1, 50), text('word order.', 505, 649.7, 50)]);
+    assert.ok(nodes.some((node) => node.str.includes('The complete sentence has the correct word order.')));
+    assert.ok(nodes.every((node) => node.type !== 9));
+});
+
+test('wide justified spaces and description labels stay within their own column', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(320, 750), ...paragraph(40, 540), ...paragraph(320, 540),
+        text('The left column stays separate.', 40, 650, 240),
+        text('First,', 330, 650, 20), text('the', 375, 650, 12), text('environment', 412, 650, 48),
+        text('variable', 485, 650, 31), text('of', 541, 650, 8),
+        text('the program determines its behavior.', 320, 636, 230),
+        text('Low', 55, 610, 20), text('runs at a lower clock frequency.', 110, 610, 165),
+        text('High', 55, 596, 25), text('runs at a higher clock frequency.', 110, 596, 165)]);
+    assert.ok(nodes.some((node) => node.str.includes('First, the environment variable of the program')));
+    assert.ok(nodes.some((node) => node.str.includes('Low runs at a lower clock frequency.')));
+    assert.ok(nodes.some((node) => node.str.includes('High runs at a higher clock frequency.')));
+    assert.ok(!nodes.some((node) => node.str.includes('stays separate.') && node.str.includes('First,')));
+});
+
+test('unindented monospaced commands retain wrapped lines and stop at proportional prose', () => {
+    const prose = (str, y) => ({...text(str, 40, y), fontName: 'serif'});
+    const command = (str, y, x = 40) => ({...text(str, x, y, str.length * 5), fontName: 'mono', monospace: true});
+    const nodes = extract([
+        ...paragraph(40, 750).map((line) => ({...line, fontName: 'serif'})),
+        prose('The following options are used for this experiment.', 700),
+        command('CFLAGS = -O3 -fopenmp', 686), command('-mcpu=example -fsave-optimization-record', 672), command('-Wall', 658),
+        prose('The environment settings are specified separately.', 644),
+        command('export MEMORY_POLICY', 630), command('=demand:demand', 616), command('export LOCK_TYPE=0', 602),
+        prose('Ordinary prose continues with the evaluation results.', 588),
+        // A monospaced identifier inside prose is not a separate code block.
+        {...text('The variable', 40, 570, 60), fontName: 'serif'}, command('LOCK_TYPE', 570, 105),
+        {...text('is set by the caller.', 155, 570, 120), fontName: 'serif'}
+    ]);
+    const blocks = nodes.filter((node) => node.type === 9);
+    assert.equal(blocks.length, 2);
+    assert.ok(encloses(blocks[0].rect, {x: 40, y: 658, width: 190, height: 38}));
+    assert.ok(encloses(blocks[1].rect, {x: 40, y: 602, width: 100, height: 38}));
+    assert.ok(blocks[0].rect.y >= 654 && top(blocks[0].rect) < 700, JSON.stringify(blocks[0].rect));
+    assert.ok(blocks[1].rect.y >= 598 && top(blocks[1].rect) < 644, JSON.stringify(blocks[1].rect));
+    assert.ok(nodes.some((node) => node.type === 1 && node.str.includes('The variable LOCK_TYPE is set by the caller.')));
+    assert.ok(nodes.filter((node) => node.type === 1).every((node) => !node.str.includes('export ')));
+});
+
+test('tight code leading preserves descenders above the following prose', () => {
+    const body = (str, y) => ({...text(str, 40, y), fontName: 'serif', fontAscent: .7});
+    const nodes = extract([...paragraph(40, 750).map((line) => ({...line, fontName: 'serif'})),
+        body('The compiler settings are specified as follows.', 700),
+        {...text('OPTIONS = -g', 40, 689, 72), fontName: 'mono', monospace: true},
+        {...text('-fdebug', 40, 678, 42), fontName: 'mono', monospace: true},
+        body('The following paragraph explains these options.', 667)]);
+    const [block] = nodes.filter((node) => node.type === 9);
+    assert.ok(block && block.rect.y <= 676 && block.rect.y >= 674);
+    assert.ok(top(block.rect) < 700);
 });

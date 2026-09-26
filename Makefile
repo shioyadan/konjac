@@ -6,7 +6,7 @@ TRANSLATION_JSON_IN ?= work/test.translation.json
 TRANSLATED_HTML_OUT ?= work/test.translated.html
 WEB_HOST ?= 127.0.0.1
 WEB_PORT ?= 8765
-REGRESSION_JOBS ?= 4
+REGRESSION_JOBS ?= 8
 
 .PHONY: all typecheck test regression extension-build web-build web-serve cli-build package cli cli-json cli-translation-json cli-import init clean distclean
 

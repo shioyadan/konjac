@@ -86,7 +86,8 @@ export function createTranslationDocument(
         source: {name: sourceName, fingerprint},
         sourceLanguage: "en",
         targetLanguage: "ja",
-        instructions: "Edit only blocks[].translation. Preserve every id, type, source, and all other fields exactly.",
+        instructions: "Edit only blocks[].translation. Preserve every id, type, source, and all other fields exactly." +
+            (nodes.some((node) => node.inlineImages?.length) ? " Keep every ⟦math-…⟧ marker unchanged in the translation; it represents an inline formula." : ""),
         blocks: translationBlockEntries(nodes, translationForNode).map((entry) => entry.block)
     };
 }
@@ -181,6 +182,7 @@ export function translatedNodesFromEntries(
     let translatedNodes = nodes.map((node) => {
         let translated = new PDF_Node(node.str, node.type, node.rect, node.sourceRect);
         translated.imageSrc = node.imageSrc;
+        if (node.inlineImages) translated.inlineImages = node.inlineImages;
         return translated;
     });
 
