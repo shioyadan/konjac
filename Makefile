@@ -6,6 +6,7 @@ TRANSLATION_JSON_IN ?= work/test.translation.json
 TRANSLATED_HTML_OUT ?= work/test.translated.html
 WEB_HOST ?= 127.0.0.1
 WEB_PORT ?= 8765
+REGRESSION_JOBS ?= 4
 
 .PHONY: all typecheck test regression extension-build web-build web-serve cli-build package cli cli-json cli-translation-json cli-import init clean distclean
 
@@ -74,8 +75,9 @@ test:
 
 # 手元の work/*.pdf を一括変換し、目視で指定した内容範囲と除外点を確認する。
 regression: cli-build test
-	@REGRESSION_OUT=$$(mktemp -d /tmp/konjac-regression.XXXXXX); \
-	for PDF_FILE in work/*.pdf; do \
-		node dist/cli/cli.cjs --json "$$PDF_FILE" > "$$REGRESSION_OUT/$$(basename "$$PDF_FILE" .pdf).json" || exit 1; \
-	done; \
+	@case "$(REGRESSION_JOBS)" in ''|*[!0-9]*|0*) echo 'REGRESSION_JOBS must be a positive integer without leading zeros' >&2; exit 1;; esac; \
+	REGRESSION_OUT=$$(mktemp -d /tmp/konjac-regression.XXXXXX) || exit 1; \
+	printf 'Regression output: %s (jobs: %s)\n' "$$REGRESSION_OUT" "$(REGRESSION_JOBS)"; \
+	printf '%s\0' work/*.pdf | xargs -0 -n 1 -P "$(REGRESSION_JOBS)" sh -c \
+		'node dist/cli/cli.cjs --json "$$2" > "$$1/$$(basename "$$2" .pdf).json"' sh "$$REGRESSION_OUT" || exit 1; \
 	node tests/pdf-regression.cjs "$$REGRESSION_OUT"

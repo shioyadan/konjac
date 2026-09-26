@@ -41,6 +41,18 @@ test('adjacent captions own separate figures', () => {
     assert.ok(right(a.rect) <= b.rect.x);
 });
 
+test('a column of figures is not stopped by prose in the other column', () => {
+    const panels = [shape(70, 570, 210, 130), shape(70, 370, 210, 130)];
+    const nodes = extract([...paragraph(320, 700), ...paragraph(320, 600), ...paragraph(320, 470),
+        text('Figure 1. Upper panel.', 65, 535, 215, 9), text('Figure 2. Lower panel.', 65, 335, 215, 9)], panels);
+    const result = figures(nodes);
+    assert.equal(result.length, 2);
+    for (let i = 0; i < panels.length; i++) {
+        assert.ok(encloses(result[i].rect, panels[i]));
+        assert.ok(right(result[i].rect) < 320);
+    }
+});
+
 test('a drawing overlapping body text cannot disable the body boundary', () => {
     const nodes = extract([...paragraph(40, 700), ...paragraph(40, 330), text('Figure 1. Diagram.', 40, 390, 210, 9)], [shape(55, 430, 210, 300)]);
     const [figure] = figures(nodes);

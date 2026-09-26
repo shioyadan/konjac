@@ -2714,12 +2714,16 @@ function regionColumnBounds(
     let left = Math.max(8, Math.min(metric.minX, anchor.x) - 8);
     let right = Math.min(metric.width - 8, Math.max(metric.maxX, rectRight(anchor)) + 8);
     let columns = layout.columns.filter((column) => column.page == anchor.page);
-    let xs = columns.map((column) => column.x).sort((a, b) => a - b);
     let splits: number[] = [];
     if (anchor.width < columnWidth * 1.2 && Math.abs(center - metric.width / 2) > columnWidth * 0.18) {
-        if (xs.length < 2) xs = captions.map((caption) => caption.captionLines[0].x).sort((a, b) => a - b);
-        if (xs.length < 2) xs = layout.columns.map((column) => column.x).sort((a, b) => a - b);
-        let starts = xs.filter((x, i) => i == 0 || x - xs[i - 1] > columnWidth * 0.6);
+        let starts: number[] = [];
+        // 一方が図だけの段でも、本文側の段位置を残してキャプション側と組み合わせる。
+        for (let xs of [columns.map((column) => column.x), captions.map((caption) => caption.captionLines[0].x),
+            layout.columns.map((column) => column.x)]) {
+            starts = [...starts, ...xs].sort((a, b) => a - b)
+                .filter((x, i, all) => i == 0 || x - all[i - 1] > columnWidth * 0.6);
+            if (starts.length >= 2) break;
+        }
         for (let i = 1; i < starts.length; i++) splits.push((starts[i - 1] + columnWidth + starts[i]) / 2);
     }
     for (let split of splits) {
