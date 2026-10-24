@@ -207,8 +207,6 @@ interface BodyLayoutModel {
 interface FigureCandidate {
     // 読み順配列でのキャプション先頭行。
     startIndex: number;
-    // 複数行キャプションの最終行。
-    endIndex: number;
     // この図表ノードにまとめたキャプション行。
     captionLines: TextLine[];
     // 出力する図表ノード。
@@ -275,16 +273,14 @@ const LINE_Y_EPSILON = 2.0;
 const COLUMN_GAP = 16.0;
 const IDENTITY_MATRIX: Matrix = [1, 0, 0, 1, 0, 0];
 const OCCUPANCY_CELL_SIZE = 2.0;
-const MASK_BODY = 1 << 0;
+const MASK_TEXT = 1 << 0;
 const MASK_SHAPE = 1 << 1;
-const MASK_FLOAT_TEXT = 1 << 2;
-const MASK_CAPTION = 1 << 3;
-const MASK_HEADING = 1 << 4;
-const MASK_OTHER_TEXT = 1 << 5;
-const MASK_CROP = 1 << 6;
-const MASK_BODY_LAYOUT = 1 << 7;
-const MASK_HARD_TEXT_BLOCKER = MASK_BODY_LAYOUT | MASK_CAPTION | MASK_HEADING;
-const MASK_CONTENT = MASK_BODY | MASK_SHAPE | MASK_FLOAT_TEXT | MASK_CAPTION | MASK_HEADING | MASK_OTHER_TEXT | MASK_BODY_LAYOUT;
+const MASK_CAPTION = 1 << 2;
+const MASK_HEADING = 1 << 3;
+const MASK_BODY = 1 << 4;
+const MASK_CROP = 1 << 5;
+const MASK_HARD_TEXT_BLOCKER = MASK_BODY | MASK_CAPTION | MASK_HEADING;
+const MASK_CONTENT = MASK_TEXT | MASK_SHAPE;
 
 type DebugScanLog = (message: string) => void;
 type MaskRange = {x0: number; x1: number; y0: number; y1: number};
@@ -775,23 +771,21 @@ function sourceRectFromLines(lines: TextLine[]) {
     return {page, x, y, width: right - x, height: top - y};
 }
 
+// 1ページ内の文字片・本文行・表セルを、同じ baseline の行へまとめる。
+function groupByBaseline<T extends {x: number; y: number}>(items: T[], tolerance: number): T[][] {
+    let rows: T[][] = [];
+    for (let item of [...items].sort((a, b) => b.y - a.y || a.x - b.x)) {
+        let row = rows[rows.length - 1];
+        if (!row || Math.abs(row[0].y - item.y) > tolerance) rows.push([item]);
+        else row.push(item);
+    }
+    return rows;
+}
+
 // 1 ページ分の TextItem を y 座標でまとめ、TextLine に復元する。
 function buildLinesForPage(textItems: unknown[], page: number) {
-    let parts = textItems
-        .map((textItem) => textItemToPart(textItem, page))
-        .filter((part): part is TextPart => part != null)
-        .sort((a, b) => b.y - a.y || a.x - b.x);
-
-    let rows: TextPart[][] = [];
-    for (let part of parts) {
-        let row = rows[rows.length - 1];
-        if (!row || Math.abs(row[0].y - part.y) > LINE_Y_EPSILON) {
-            rows.push([part]);
-        }
-        else {
-            row.push(part);
-        }
-    }
+    let parts = textItems.map((item) => textItemToPart(item, page)).filter((part): part is TextPart => part != null);
+    let rows = groupByBaseline(parts, LINE_Y_EPSILON);
 
     let lines: TextLine[] = [];
     for (let row of rows) {
@@ -2052,6 +2046,11 @@ function estimateBodyLayout(lines: TextLine[], bodyFontSize: number, columnWidth
     return {columns};
 }
 
+function distinctBodyColumns(layout: BodyLayoutModel, columnWidth: number) {
+    return layout.columns.filter((column) => !layout.columns.some((other) => other.page == column.page &&
+        other.x < column.x && column.x - other.x < columnWidth * 0.5));
+}
+
 function looksLikeBodyLine(line: TextLine, bodyFontSize: number) {
     return (
         line.fontSize >= bodyFontSize - 1.2 ||
@@ -2138,6 +2137,13 @@ function lineRect(line: TextLine): PDF_Rect {
     };
 }
 
+// コード下端を本文の概算高さで削らないよう、境界の上端に書体の ascent を使う。
+function textBoundaryRect(rect: PDF_Rect, lines: TextLine[]): PDF_Rect {
+    let top = Math.max(...lines.flatMap((line) => line.parts.map((part) =>
+        part.y + part.fontSize * (part.fontAscent ?? 1))));
+    return {...rect, height: top - rect.y};
+}
+
 function isBodySizedProseFragment(line: TextLine, bodyFontSize: number) {
     return line.fontSize >= Math.max(7, bodyFontSize - 0.8) &&
         line.text.length > 12 &&
@@ -2179,15 +2185,6 @@ function isBodyLayoutLine(
         column.page == line.page &&
         matchesBodyColumnX(line, column, columnWidth) &&
         matchesBodyBaseline(line, column)
-    );
-}
-
-function lineNearGraphics(line: TextLine, graphics: PDF_GraphicObject[], metric: PageMetrics) {
-    let box = expandRect(lineRect(line), 6, metric);
-    return graphics.some((graphic) =>
-        graphic.page == line.page &&
-        usefulGraphicObject(graphic, metric) &&
-        rectsOverlap(box, expandRect(graphic, Math.max(4, graphic.strokeWidth ?? 1), metric))
     );
 }
 
@@ -2290,87 +2287,29 @@ function drawRectOutlineToMask(mask: OccupancyMask, rect: PDF_Rect, bits: number
     drawRectToMask(mask, {page: rect.page, x: rectRight(rect) - t, y: rect.y, width: t, height: rect.height}, bits);
 }
 
-function lineOccupancyBits(
-    line: TextLine,
-    graphics: PDF_GraphicObject[],
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    bodyLayout?: BodyLayoutModel
-) {
-    if (isCaptionLine(line, bodyFontSize, columnWidth)) {
-        return MASK_CAPTION;
-    }
-    if (isHeadingText(line.text)) {
-        return MASK_HEADING;
-    }
-    if (isBodyLayoutLine(line, bodyLayout, bodyFontSize, columnWidth)) {
-        return MASK_BODY;
-    }
-    if (
-        isParagraphLikeLine(line, bodyFontSize, columnWidth) ||
-        isBodySizedProseFragment(line, bodyFontSize) ||
-        isBodyTextForOccupancyMask(line, bodyFontSize, columnWidth)
-    ) {
-        return MASK_BODY;
-    }
-    if (
-        line.fontSize < bodyFontSize - 0.8 ||
-        line.width < columnWidth * 0.7 ||
-        lineNearGraphics(line, graphics, metric)
-    ) {
-        return MASK_FLOAT_TEXT;
-    }
-    return MASK_OTHER_TEXT;
+// 本文か図中の文字かはここで再推定しない。停止領域は共有の RegionBoundary から描く。
+function lineOccupancyBits(line: TextLine, bodyFontSize: number, columnWidth: number) {
+    if (isCaptionLine(line, bodyFontSize, columnWidth)) return MASK_CAPTION;
+    return isHeadingText(line.text) ? MASK_HEADING : MASK_TEXT;
 }
 
-function isBodyTextForOccupancyMask(line: TextLine, bodyFontSize: number, columnWidth: number) {
-    return Math.abs(line.fontSize - bodyFontSize) <= 1.2 &&
-        line.width > Math.min(90, columnWidth * 0.32) &&
-        line.text.length > 14 &&
-        /[a-z]{3,}/i.test(line.text) &&
-        /\s/.test(line.text);
-}
-
-function paintOccupancyMask(
-    mask: OccupancyMask,
-    lines: TextLine[],
-    graphics: PDF_GraphicObject[],
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    bodyLayout?: BodyLayoutModel
+function buildOccupancyMask(
+    rect: PDF_Rect, lines: TextLine[], graphics: PDF_GraphicObject[],
+    bodyFontSize: number, columnWidth: number, metric: PageMetrics
 ) {
+    let mask = createOccupancyMask(rect);
     for (let graphic of graphics) {
         if (graphic.page == mask.page && usefulGraphicObject(graphic, metric)) {
             mask.debugGraphicCount++;
             drawRectToMask(mask, expandRect(graphic, Math.max(1, graphic.strokeWidth ?? 1), metric), MASK_SHAPE);
         }
     }
-
     for (let line of lines) {
         if (line.page == mask.page) {
             mask.debugLineCount++;
-            drawRectToMask(
-                mask,
-                lineRect(line),
-                lineOccupancyBits(line, graphics, bodyFontSize, columnWidth, metric, bodyLayout)
-            );
+            drawRectToMask(mask, lineRect(line), lineOccupancyBits(line, bodyFontSize, columnWidth));
         }
     }
-}
-
-function buildOccupancyMask(
-    rect: PDF_Rect,
-    lines: TextLine[],
-    graphics: PDF_GraphicObject[],
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    bodyLayout?: BodyLayoutModel
-) {
-    let mask = createOccupancyMask(rect);
-    paintOccupancyMask(mask, lines, graphics, bodyFontSize, columnWidth, metric, bodyLayout);
     return mask;
 }
 
@@ -2456,21 +2395,8 @@ function appendBBoxLayerSVG(
     svg.push(`</g>`);
 }
 
-function lineRectsByMaskBit(
-    lines: TextLine[],
-    bit: number,
-    graphics: PDF_GraphicObject[],
-    bodyFontSize: number,
-    columnWidth: number,
-    metric: PageMetrics,
-    bodyLayout: BodyLayoutModel
-) {
-    return lines
-        .filter((line) =>
-            line.page == metric.page &&
-            (lineOccupancyBits(line, graphics, bodyFontSize, columnWidth, metric, bodyLayout) & bit) != 0
-        )
-        .map(lineRect);
+function lineRectsByMaskBit(lines: TextLine[], bit: number, bodyFontSize: number, columnWidth: number) {
+    return lines.filter((line) => (lineOccupancyBits(line, bodyFontSize, columnWidth) & bit) != 0).map(lineRect);
 }
 
 function isOuterFrameLikeGraphic(graphic: PDF_GraphicObject, metric: PageMetrics) {
@@ -2490,7 +2416,7 @@ function occupancyMaskToSVG(
     figures: FigureCandidate[],
     bodyFontSize: number,
     columnWidth: number,
-    bodyLayout: BodyLayoutModel
+    boundaries: RegionBoundary[]
 ): PDF_DebugMaskDump {
     let pageWidth = mask.width * mask.cellSize;
     let pageHeight = mask.height * mask.cellSize;
@@ -2513,10 +2439,8 @@ function occupancyMaskToSVG(
 
     // 1 セルに複数属性が立つので、単一色へ潰さず半透明レイヤとして重ねて表示する。
     appendMaskLayerSVG(svg, mask, MASK_SHAPE, [40, 105, 220], 0.28);
-    appendMaskLayerSVG(svg, mask, MASK_OTHER_TEXT, [210, 210, 210], 0.6);
-    appendMaskLayerSVG(svg, mask, MASK_BODY, [80, 80, 80], 0.7);
-    appendMaskLayerSVG(svg, mask, MASK_BODY_LAYOUT, [0, 0, 0], 0.55);
-    appendMaskLayerSVG(svg, mask, MASK_FLOAT_TEXT, [40, 160, 80], 0.55);
+    appendMaskLayerSVG(svg, mask, MASK_TEXT, [80, 80, 80], 0.7);
+    appendMaskLayerSVG(svg, mask, MASK_BODY, [0, 0, 0], 0.55);
     appendMaskLayerSVG(svg, mask, MASK_CAPTION, [220, 55, 45], 0.78);
     appendMaskLayerSVG(svg, mask, MASK_HEADING, [155, 80, 185], 0.78);
     appendMaskLayerSVG(svg, mask, MASK_CROP, [255, 200, 0], 0.9);
@@ -2524,23 +2448,19 @@ function occupancyMaskToSVG(
     // 細い枠線は bitmap 化前の元 bbox。大きな mask が元 bbox 由来か、塗りの連結かを確認する。
     appendBBoxLayerSVG(svg, pageAnchorGraphics, [0, 80, 220], 0.95, 0.8, "3 2");
     appendBBoxLayerSVG(svg, pageExcludedOuterFrames, [230, 40, 160], 1.0, 1.4, "6 2");
-    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_OTHER_TEXT, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [150, 150, 150], 0.8, 0.5);
-    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_BODY, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [20, 20, 20], 0.9, 0.5);
-    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_BODY_LAYOUT, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [0, 0, 0], 1.0, 0.9);
-    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_FLOAT_TEXT, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [0, 125, 55], 0.9, 0.5);
-    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_CAPTION, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [200, 20, 20], 0.95, 0.7);
-    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_HEADING, graphics, bodyFontSize, columnWidth, metric, bodyLayout), [120, 45, 170], 0.95, 0.7);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_TEXT, bodyFontSize, columnWidth), [20, 20, 20], 0.9, 0.5);
+    appendBBoxLayerSVG(svg, boundaries.filter((block) => block.rect.page == mask.page && block.kind == "body").map((block) => block.rect), [0, 0, 0], 1.0, 0.9);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_CAPTION, bodyFontSize, columnWidth), [200, 20, 20], 0.95, 0.7);
+    appendBBoxLayerSVG(svg, lineRectsByMaskBit(pageLines, MASK_HEADING, bodyFontSize, columnWidth), [120, 45, 170], 0.95, 0.7);
     appendBBoxLayerSVG(svg, pageFigures, [220, 160, 0], 1.0, 1.5);
 
     svg.push(`</g>`);
     svg.push(`<g font-family="sans-serif" font-size="10">`);
-    svg.push(`<rect x="${mask.x + 6}" y="${mask.y + 6}" width="230" height="178" fill="white" fill-opacity="0.86" stroke="#ddd"/>`);
+    svg.push(`<rect x="${mask.x + 6}" y="${mask.y + 6}" width="230" height="150" fill="white" fill-opacity="0.86" stroke="#ddd"/>`);
     [
         ["MASK_SHAPE", [40, 105, 220]],
-        ["MASK_OTHER_TEXT", [210, 210, 210]],
-        ["MASK_BODY", [80, 80, 80]],
-        ["MASK_BODY_LAYOUT", [0, 0, 0]],
-        ["MASK_FLOAT_TEXT", [40, 160, 80]],
+        ["MASK_TEXT", [80, 80, 80]],
+        ["MASK_BODY", [0, 0, 0]],
         ["MASK_CAPTION", [220, 55, 45]],
         ["MASK_HEADING", [155, 80, 185]],
         ["MASK_CROP", [255, 200, 0]],
@@ -2573,7 +2493,7 @@ function emitDebugMasks(
     figures: FigureCandidate[],
     bodyFontSize: number,
     columnWidth: number,
-    bodyLayout: BodyLayoutModel,
+    boundaries: RegionBoundary[],
     masks: Map<number, OccupancyMask>
 ) {
     if (!options?.debugMaskSink) {
@@ -2589,7 +2509,7 @@ function emitDebugMasks(
                 drawRectOutlineToMask(mask, figure.node.rect, MASK_CROP);
             }
         }
-        options.debugMaskSink(occupancyMaskToSVG(mask, metric, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout));
+        options.debugMaskSink(occupancyMaskToSVG(mask, metric, lines, graphics, figures, bodyFontSize, columnWidth, boundaries));
     }
 }
 
@@ -2600,9 +2520,9 @@ function estimateCodeFigureRect(
     let anchor = sourceRectFromLines(captionLines)!;
     let regions = ([-1, 1] as const).flatMap((direction) => {
         let edge = direction < 0 ? Math.min(...captionLines.map((line) => line.y)) : Math.max(...captionLines.map((line) => line.y));
-        let nearby = tableTextRows(lines.filter((line) => line.page == anchor.page && !captionLines.includes(line) &&
+        let nearby = groupByBaseline(lines.filter((line) => line.page == anchor.page && !captionLines.includes(line) &&
             (line.y - edge) * direction > 0 && line.x + line.width / 2 >= owner.x && line.x + line.width / 2 <= rectRight(owner)),
-            bodyFontSize).map((row) => partsToLine(row.lines.flatMap((line) => line.parts))!)
+            bodyFontSize * 0.3).map((row) => partsToLine(row.flatMap((line) => line.parts))!)
             .sort((a, b) => (a.y - b.y) * direction);
         let group: TextLine[] = [], lastY = edge, fixed = false;
         for (let line of nearby) {
@@ -2618,11 +2538,7 @@ function estimateCodeFigureRect(
         }
         if (!group.length || !fixed && group.length < 2) return [];
         let bounds = boundRegionAtText(anchor, owner, direction,
-            nearby.filter((line) => !group.includes(line)).map((line) => {
-                let rect = lineRect(line);
-                return {...rect, height: Math.max(...line.parts.map((part) =>
-                    part.y + part.fontSize * (part.fontAscent ?? 1))) - rect.y};
-            }), 0);
+            nearby.filter((line) => !group.includes(line)).map((line) => textBoundaryRect(lineRect(line), [line])), 0);
         if (!bounds) return [];
         let rect = intersectRectsLoose(expandRect(unionRects(group.map(lineRect))!, bodyFontSize * 0.4, metric), bounds);
         return rect ? [{rect, gap: Math.abs(group[0].y - edge)}] : [];
@@ -2645,7 +2561,7 @@ function collectRegionBoundaries(
     let captionLines = new Set(captionTextLines);
     let markers = lines.filter((line) => /^[\d*†‡]+$/.test(line.text.trim()));
     let blocks: RegionBoundary[] = captions.map((caption) => ({
-        kind: "caption", rect: sourceRectFromLines(caption.captionLines)!, lines: caption.captionLines
+        kind: "caption", rect: caption.node.sourceRect!, lines: caption.captionLines
     }));
     for (let group of metadata ? [metadata.titleLines, metadata.authorLines, metadata.affiliationLines, [...metadata.ignoredLines]] : []) {
         let rect = sourceRectFromLines(group);
@@ -2754,15 +2670,8 @@ function boundRegionAtText(anchor: PDF_Rect, owner: PDF_Rect, direction: 1 | -1,
 
 // 同じ高さの断片をセルへまとめる。単語間の通常の空白はセル境界にしない。
 function tableTextRows(lines: TextLine[], bodyFontSize: number) {
-    let rows: Array<{y: number; cells: PDF_Rect[]; lines: TextLine[]}> = [];
-    for (let line of [...lines].sort((a, b) => b.y - a.y || a.x - b.x)) {
-        let row = rows[rows.length - 1];
-        if (!row || Math.abs(row.y - line.y) > bodyFontSize * 0.3) {
-            row = {y: line.y, cells: [], lines: []};
-            rows.push(row);
-        }
-        row.lines.push(line);
-    }
+    let rows = groupByBaseline(lines, bodyFontSize * 0.3).map((lines) =>
+        ({y: lines[0].y, cells: [] as PDF_Rect[], lines}));
     for (let row of rows) {
         for (let part of row.lines.flatMap((line) => line.parts).sort((a, b) => a.x - b.x)) {
             let cell = {page: part.page, x: part.x, y: part.y - part.fontSize * 0.25, width: part.width, height: part.fontSize * 1.25};
@@ -2870,7 +2779,6 @@ function collectFigureCandidates(
         let collectedCaptionLines = lines.slice(i, endIndex + 1);
         candidates.push({
             startIndex: i,
-            endIndex,
             captionLines: collectedCaptionLines,
             node: new PDF_Node(
                 caption,
@@ -2888,7 +2796,7 @@ function collectFigureCandidates(
         let captions = candidates.filter((candidate) => candidate.captionLines[0].page == metric.page);
         if (!captions.length && !options?.debugMaskSink) continue;
         let pageGraphics = graphics.filter((graphic) => !graphicExcludedByCaption(graphic, captions.flatMap((c) => c.captionLines), metric));
-        let mask = buildOccupancyMask(pageRect, lines, pageGraphics, bodyFontSize, columnWidth, metric, bodyLayout);
+        let mask = buildOccupancyMask(pageRect, lines, pageGraphics, bodyFontSize, columnWidth, metric);
         let ink = pageInk.get(metric.page);
         if (ink) {
             for (let i = 0; i < mask.cells.length; i++) mask.cells[i] &= ~MASK_SHAPE;
@@ -2900,12 +2808,12 @@ function collectFigureCandidates(
         }
         // 行の間も本文の境界に含め、図形と同じセルに重なっても境界を維持する。
         for (let block of boundaries.filter((block) => block.rect.page == metric.page)) {
-            drawRectToMask(mask, block.rect, block.kind == "body" ? MASK_BODY_LAYOUT : block.kind == "heading" ? MASK_HEADING : MASK_CAPTION);
+            drawRectToMask(mask, block.rect, block.kind == "body" ? MASK_BODY : block.kind == "heading" ? MASK_HEADING : MASK_CAPTION);
         }
         masks.set(metric.page, mask);
         for (let candidate of [...captions].sort((a, b) => Number(isTableCaption(b.node.str)) - Number(isTableCaption(a.node.str)))) {
             let log = scanLoggerForCaption(options, candidate.node.str);
-            let anchor = sourceRectFromLines(candidate.captionLines)!;
+            let anchor = candidate.node.sourceRect!;
             let owner = regionColumnBounds(anchor, captions, bodyLayout, columnWidth, metric);
             if (isCodeCaptionLine(candidate.captionLines[0])) {
                 candidate.node.rect = estimateCodeFigureRect(candidate.captionLines, lines, bodyFontSize, owner, metric);
@@ -2918,7 +2826,7 @@ function collectFigureCandidates(
                 graphic.height > bodyFontSize * 3 && graphic.y >= rectTop(anchor) - bodyFontSize &&
                 graphic.y - rectTop(anchor) < bodyFontSize * 4 &&
                 graphic.x < rectRight(anchor) && rectRight(graphic) > anchor.x &&
-                !captions.some((other) => other !== candidate && rectsOverlap(sourceRectFromLines(other.captionLines)!, graphic)))
+                !captions.some((other) => other !== candidate && rectsOverlap(other.node.sourceRect!, graphic)))
                 .sort((a, b) => a.y - b.y)[0];
             if (image && !table) {
                 let left = Math.min(owner.x, image.x - bodyFontSize * 0.4);
@@ -2952,18 +2860,26 @@ function collectFigureCandidates(
     return {figures: candidates.filter((candidate) => candidate.node.rect), boundaries, masks};
 }
 
+const EQUATION_NUMBER_PATTERN = "\\d+(?:\\.\\d+)*[a-z]?";
+const EQUATION_NUMBER_START = new RegExp(`^\\s*\\(${EQUATION_NUMBER_PATTERN}\\)`);
+const EQUATION_NUMBER_END = new RegExp(`\\(${EQUATION_NUMBER_PATTERN}\\)\\s*$`);
+const UNMAPPED_EQUATION_NUMBER = new RegExp(`^�\\s*(${EQUATION_NUMBER_PATTERN})\\s*�$`);
+
 // 文字対応のない括弧でも、独立した「記号・数字・記号」の式番号は位置で照合できる。
 function equationLineText(line: TextLine) {
     let label = line.parts.map((part) => part.unmapped && part.text.trim().length == 1 ? "�" : part.text).join("").trim()
-        .match(/^�\s*(\d+(?:\.\d+)*[a-z]?)\s*�$/);
+        .match(UNMAPPED_EQUATION_NUMBER);
     return label ? `(${label[1]})` : line.text;
+}
+
+function equationDetectionText(line: TextLine) {
+    return equationLineText(line).replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "").trim();
 }
 
 // 式番号は左右どちらの端にも置ける。本文中の括弧付き参照は起点にしない。
 function equationNumberEdge(line: TextLine): "left" | "right" | "either" | null {
-    let text = equationLineText(line).replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "").trim();
-    let label = "\\(\\d+(?:\\.\\d+)*[a-z]?\\)";
-    let left = new RegExp(`^${label}`).test(text), right = new RegExp(`${label}$`).test(text);
+    let text = equationDetectionText(line);
+    let left = EQUATION_NUMBER_START.test(text), right = EQUATION_NUMBER_END.test(text);
     return left && right ? "either" : left ? "left" : right ? "right" : null;
 }
 
@@ -3021,8 +2937,7 @@ function collectDisplayCandidates(
     let available = lines.map((line, index) => ({line, index})).filter(({line}) =>
         !blockedLines.has(line) && !excludedRects.some((rect) => lineCenterInsideRect(line, rect))
     );
-    let columns = bodyLayout.columns.filter((column) => !bodyLayout.columns.some((other) => other.page == column.page &&
-        other.x < column.x && column.x - other.x < columnWidth * 0.5));
+    let columns = distinctBodyColumns(bodyLayout, columnWidth);
     let gridLines = new Set<TextLine>();
     for (let column of columns) {
         let rows = tableTextRows(available.map(({line}) => line).filter((line) => line.page == column.page &&
@@ -3063,8 +2978,7 @@ function collectDisplayCandidates(
         let anchorRect = {...lineRect(anchor.line), y: anchor.line.y, height: 0};
         // 密なコード行の descender を次の本文の概算 bbox で切らないよう、書体の ascent を使う。
         let blockers = [...boundaries.map((block) => fixedCode && block.kind == "body"
-            ? {...block.rect, height: Math.max(...block.lines.flatMap((line) => line.parts.map((part) =>
-                part.y + part.fontSize * (part.fontAscent ?? 1)))) - block.rect.y}
+            ? textBoundaryRect(block.rect, block.lines)
             : block.rect), ...excludedRects];
         let above = boundRegionAtText(anchorRect, owner, 1, blockers, 0);
         let below = boundRegionAtText(anchorRect, owner, -1, blockers, 0);
@@ -3099,20 +3013,25 @@ function collectDisplayCandidates(
         let sourceLines = [...members].map((index) => lines[index]);
         let code = fixedCode || sourceLines.some((line) => isCodeStatement(line.text));
         let grid = sourceLines.some((line) => gridLines.has(line));
-        let piecewise = sourceLines.some((line) => line.text.includes("{")) &&
-            sourceLines.some((line) => isEquationRelationLine(line, columnWidth));
+        let relation = sourceLines.some((line) => isEquationRelationLine(line, columnWidth));
+        let unmapped = sourceLines.some((line) => line.parts.some((part) => part.unmapped));
+        let piecewise = relation && sourceLines.some((line) => line.text.includes("{"));
         // 番号だけ、通常の文章、箇条書きを数式画像にしない。記号がなくても式本体は拾う。
-        let content = sourceLines.map((line) => equationLineText(line).replace(/[\u0000-\u001f\u007f\ue000-\uf8ff]/g, "")
-            .replace(/^\s*\(\d+(?:\.\d+)*[a-z]?\)|\(\d+(?:\.\d+)*[a-z]?\)\s*$/g, "").trim()).filter(Boolean);
-        if (!content.length || (!code && !grid && !sourceLines.some((line) => isEquationRelationLine(line, columnWidth) || line.parts.some((part) => part.unmapped)) &&
+        let content = sourceLines.map((line) => equationDetectionText(line)
+            .replace(EQUATION_NUMBER_START, "").replace(EQUATION_NUMBER_END, "").trim()).filter(Boolean);
+        if (!content.length) continue;
+        if (!code && !grid && !relation && !unmapped &&
             (content.some((text) => !isMathFragment(text) || isListItemStart(text)) ||
-                !content.some((text) => /[\p{Sm}\d]|(?:^|\s)\p{L}(?:\s|$)/u.test(text))))) continue;
+                !content.some((text) => /[\p{Sm}\d]|(?:^|\s)\p{L}(?:\s|$)/u.test(text)))) continue;
         if (!numbered) {
-            // 本文との境界は共有の bounds に任せ、字下げと式の内容を確認する。
-            let drawnMath = rect.width > columnWidth * 0.3 && sourceLines.every((line) => line.parts.every((part) => part.unmapped));
-            if (!fixedCode && !piecewise && !drawnMath && rect.x < column.x + bodyFontSize * 0.8 || rect.width < bodyFontSize * 2 || rect.width > columnWidth * 1.05 ||
-                !fixedCode && !piecewise && sourceLines.some((line) => !(code && /^\s*\/\//.test(line.text)) && (!isMathFragment(line.text) || isListItemStart(line.text) ||
-                    /^[\s\u0000-\u001f]*[●◦▪\uf0b7]/.test(line.text)))) continue;
+            if (rect.width < bodyFontSize * 2 || rect.width > columnWidth * 1.05) continue;
+            // コードと場合分け以外は、字下げと本文の混入も確認する。
+            if (!fixedCode && !piecewise) {
+                let drawnMath = rect.width > columnWidth * 0.3 && sourceLines.every((line) => line.parts.every((part) => part.unmapped));
+                if (!drawnMath && rect.x < column.x + bodyFontSize * 0.8) continue;
+                if (sourceLines.some((line) => !(code && /^\s*\/\//.test(line.text)) &&
+                    (!isMathFragment(line.text) || isListItemStart(line.text) || /^[\s\u0000-\u001f]*[●◦▪\uf0b7]/.test(line.text)))) continue;
+            }
         }
         let sourceRect = sourceRectFromLines(sourceLines)!;
         let decorations = graphics.filter((graphic) => graphic.page == rect.page && graphic.kind == "path" &&
@@ -3174,8 +3093,7 @@ function restoreInlineContent(
     let available = lines.filter((line) => !reserved.has(line) && !excluded.some((rect) => lineCenterInsideRect(line, rect)));
     let sourceLines = new Map(available.flatMap((line) => line.parts.map((part) => [part, line] as const)));
     let parts = available.flatMap((line) => line.parts);
-    let columns = layout.columns.filter((column) => !layout.columns.some((other) => other.page == column.page &&
-        other.x < column.x && column.x - other.x < columnWidth * 0.5));
+    let columns = distinctBodyColumns(layout, columnWidth);
     let rows: {page: number; x: number; y: number; fontSize: number; parts: TextPart[]; words: Set<TextPart>}[] = [];
     for (let part of parts) {
         let smallProse = part.fontSize < bodyFontSize * 0.85 && (part.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 2;
@@ -3317,19 +3235,12 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let bodyLayout = estimateBodyLayout(lines, bodyFontSize, columnWidth);
     let readingLines = sortLinesForReading(lines);
     let {figures, boundaries, masks} = collectFigureCandidates(readingLines, graphics, bodyFontSize, figureColumnWidth, pageMetrics, bodyLayout, options, new Map(pages.flatMap((page, i) => !Array.isArray(page) && page.ink ? [[i + 1, page.ink] as const] : [])), metadata);
-    emitDebugMasks(options, pageMetrics, lines, graphics, figures, bodyFontSize, columnWidth, bodyLayout, masks);
+    emitDebugMasks(options, pageMetrics, lines, graphics, figures, bodyFontSize, columnWidth, boundaries, masks);
     let figureByStart = new Map(figures.map((figure) => [readingLines[figure.startIndex], figure]));
-    let captionLines = new Set<TextLine>();
+    let captionLines = new Set(figures.flatMap((figure) => figure.captionLines));
     let figureRects = figures
         .map((figure) => figure.node.rect)
         .filter((rect): rect is PDF_Rect => rect != null);
-
-    // 複数行キャプションは FIGURE ノードにまとめるので、元の行は本文候補から外す。
-    for (let figure of figures) {
-        for (let i = figure.startIndex; i <= figure.endIndex; i++) {
-            captionLines.add(readingLines[i]);
-        }
-    }
 
     // 図表以外の独立ブロックを先に確定し、残りの本文行を復元する。
     let displays = collectDisplayCandidates(
@@ -3351,7 +3262,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         ...readingLines.filter((line) => isHeadingLine(line, bodyFontSize) || isTitleLine(line, bodyFontSize))]), bodyFontSize, columnWidth, bodyLayout, pageMetrics,
         [...figureRects, ...displays.map((display) => display.node.rect!)], nextMathMarker);
     for (let figure of figures) {
-        let rect = sourceRectFromLines(figure.captionLines)!;
+        let rect = figure.node.sourceRect!;
         let fontSize = median(figure.captionLines.map(lineDominantFontSize), bodyFontSize);
         let captionLines = restoreInlineContent(figure.captionLines, new Set(), fontSize, rect.width,
             {columns: [{page: rect.page, x: rect.x, yStep: fontSize * 1.2, baselines: figure.captionLines.map((line) => line.y)}]},
@@ -3420,20 +3331,11 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     for (let i = 0; i < readingLines.length; i++) {
         let line = readingLines[i];
         let relaxedHeading = rasterPages.has(line.page);
-        let figure = figureByStart.get(line);
-        if (figure) {
+        let block = figureByStart.get(line) ?? displayByStart.get(line);
+        if (block) {
             flushTitle();
             flushParagraph();
-            nodes.push(figure.node);
-            prevTextLine = null;
-            continue;
-        }
-
-        let display = displayByStart.get(line);
-        if (display) {
-            flushTitle();
-            flushParagraph();
-            nodes.push(display.node);
+            nodes.push(block.node);
             prevTextLine = null;
             continue;
         }

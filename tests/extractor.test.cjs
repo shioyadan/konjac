@@ -743,3 +743,20 @@ test('a Listing preserves code descenders just above proportional prose', () => 
     assert.ok(listing && listing.rect.y <= 676 && listing.rect.y >= 674);
     assert.ok(top(listing.rect) < 700);
 });
+
+test('debug masks show actual body boundaries without changing extraction', () => {
+    const pages = [{width: 600, height: 800, items: paragraph(40, 700)},
+        {width: 600, height: 800, items: [...paragraph(40, 730), ...paragraph(40, 330),
+            text('Figure 1. Diagram.', 40, 390, 210, 9)], graphics: [shape(55, 430, 210, 230)]}];
+    const dumps = [], logs = [];
+    const nodes = extractNodesFromPages(pages, {debugMaskSink: (dump) => dumps.push(dump),
+        debugScanCaption: 'Figure 1.', debugScanSink: (line) => logs.push(line)});
+    assert.deepEqual(nodes, extractNodesFromPages(pages));
+    const {svg} = dumps.find((dump) => dump.page === 2);
+    assert.match(svg, /MASK_TEXT/);
+    assert.match(svg, /MASK_BODY/);
+    assert.doesNotMatch(svg, /MASK_FLOAT_TEXT|MASK_OTHER_TEXT|MASK_BODY_LAYOUT|NaN|Infinity/);
+    // 本文3行をまとめた停止領域も元の座標で表示する。
+    assert.match(svg, /<rect x="40" y="699\.5" width="240" height="40\.5"\/>/);
+    assert.ok(logs.some((line) => line.includes('region: result')));
+});
