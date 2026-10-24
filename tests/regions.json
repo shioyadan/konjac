@@ -5,6 +5,7 @@
       {"caption": "Figure 1:", "page": 1, "content": [335, 445, 205, 225], "exclude": [[200, 600]]},
       {"caption": "Figure 5:", "page": 4, "content": [342, 121, 205, 59], "exclude": [[450, 195]]},
       {"caption": "Table 1:", "page": 7, "content": [328, 406, 214, 49], "exclude": [[440, 470]]},
+      {"caption": "Algorithm 1", "page": 8, "content": [328, 534, 226, 84], "exclude": [[450, 626], [400, 515], [400, 494]]},
       {"caption": "Table 2:", "page": 9, "content": [57, 90, 235, 217], "exclude": [[330, 200]]},
       {"caption": "Figure 17:", "page": 11, "content": [60, 610, 485, 115]}
     ]
@@ -48,7 +49,7 @@
     "regions": [
       {"caption": "Table II ", "page": 5, "content": [318, 610, 227, 83], "exclude": [[440, 570]]},
       {"caption": "Figure 6.", "page": 5, "content": [330, 430, 202, 163], "exclude": [[440, 635]]},
-      {"caption": "Figure 12.", "page": 9, "content": [125, 579, 374, 139]}
+      {"caption": "Figure 12.", "page": 9, "content": [125, 579, 369, 139]}
     ]
   },
   "test6": {
@@ -228,6 +229,67 @@
       {"inline": true, "page": 9, "content": [387.5, 147, 38, 6.5], "exclude": [[375, 150], [440, 150], [400, 160]]},
       {"caption": "Figure 11:", "page": 10, "content": [88, 480, 478, 253], "exclude": [[300, 464], [180, 430]]},
       {"caption": "Figure 12:", "page": 11, "content": [88, 480, 480, 253], "exclude": [[300, 464], [180, 430]]}
+    ]
+  },
+  "test15": {
+    "figures": 7, "equations": 11, "readableMath": true,
+    "prose": ["by evaluating the expression", "2. Given", "which can be rewritten as"],
+    "regions": [
+      {"caption": "Figure 1.", "page": 3, "content": [329, 451, 198, 267], "exclude": [[400, 430]]},
+      {"caption": "Table 1.", "page": 5, "content": [96, 617, 420, 103], "exclude": [[300, 595]]},
+      {"caption": "Figure 2.", "page": 5, "content": [130, 460, 103, 106], "exclude": [[180, 440]]},
+      {"caption": "Figure 3.", "page": 5, "content": [316, 376, 224, 190], "exclude": [[430, 352]]},
+      {"caption": "Figure 4.", "page": 7, "content": [72, 530, 224, 190], "exclude": [[180, 510]]},
+      {"caption": "Figure 5.", "page": 7, "content": [340, 538, 178, 180], "exclude": [[420, 510]]},
+      {"caption": "Table 2.", "page": 8, "content": [80, 528, 206, 192], "exclude": [[180, 500]]},
+      {"equation": "1", "page": 3, "content": [114, 686, 180, 15], "exclude": [[200, 710], [150, 673]]},
+      {"equation": "2", "page": 3, "content": [129, 460, 165, 29], "exclude": [[150, 499], [150, 443]]},
+      {"equation": "3", "page": 3, "content": [99, 419, 195, 15], "exclude": [[150, 443], [150, 403]]},
+      {"equation": "4", "page": 3, "content": [93, 377, 201, 19], "exclude": [[150, 403], [150, 363]]},
+      {"equation": "5", "page": 3, "content": [127, 265, 167, 15], "exclude": [[150, 289], [150, 250]]},
+      {"equation": "6", "page": 3, "content": [136, 133, 158, 15], "exclude": [[100, 158], [150, 119]]},
+      {"equation": "7", "page": 5, "content": [110, 357, 184, 12], "exclude": [[150, 339]]},
+      {"equation": "8", "page": 5, "content": [104, 122, 190, 13], "exclude": [[150, 158], [150, 105]]},
+      {"equation": "9", "page": 5, "content": [112, 78, 182, 14], "exclude": [[150, 105]]},
+      {"equationIndex": 1, "page": 6, "content": [74, 293, 212, 28], "exclude": [[150, 330], [150, 275]]},
+      {"equationIndex": 2, "page": 6, "content": [73, 253, 224, 31], "exclude": [[150, 296], [150, 238]]}
+    ]
+  },
+  "test16": {
+    "figures": 13, "equations": 16, "blocks": 1, "readableMath": true,
+    "headingOrder": ["3 MINIMAX QUADRATIC INTERPOLATOR", "3.1 Range Reduction and Notation", "3.2 Overview of the Method"],
+    "prose": ["Table 1. It happens that", "Table 7. To allow for a fair comparison", "Such acceleration can be achieved [29], [31], [36] by combining the use of redundant arithmetic, a specialized squaring unit, and the accumulation of all partial products in a multioperand adder."],
+    "regions": [
+      {"caption": "Fig. 1.", "page": 4, "content": [293, 464, 243, 255], "exclude": [[420, 449], [200, 600]]},
+      {"caption": "Fig. 2.", "page": 5, "content": [45, 497, 214, 224], "exclude": [[150, 477]]},
+      {"caption": "Fig. 3.", "page": 7, "content": [104, 470, 359, 251], "exclude": [[180, 450]]},
+      {"caption": "Fig. 4.", "page": 7, "content": [51, 49, 201, 215], "exclude": [[150, 31]]},
+      {"caption": "Fig. 5.", "page": 11, "content": [116, 534, 334, 187], "exclude": [[180, 516]]},
+      {"caption": "Fig. 6.", "page": 12, "content": [113, 384, 341, 337], "exclude": [[180, 366], [450, 348]]},
+      {"caption": "TABLE 1", "page": 8, "content": [141, 567, 286, 124], "exclude": [[280, 714], [160, 547]]},
+      {"caption": "TABLE 2", "page": 9, "content": [121, 593, 324, 111], "exclude": [[280, 727], [150, 577]]},
+      {"caption": "TABLE 3", "page": 9, "content": [121, 451, 324, 98], "exclude": [[280, 568], [150, 428]]},
+      {"caption": "TABLE 4", "page": 10, "content": [103, 603, 360, 88], "exclude": [[280, 715], [150, 580]]},
+      {"caption": "TABLE 5", "page": 13, "content": [45, 511, 214, 196], "exclude": [[150, 730], [150, 495]]},
+      {"caption": "TABLE 6", "page": 13, "content": [113, 40, 340, 67], "exclude": [[280, 130], [440, 122]]},
+      {"caption": "TABLE 7", "page": 14, "content": [113, 613, 340, 78], "exclude": [[280, 715], [150, 590]]},
+      {"equation": "1", "page": 4, "content": [377, 206, 163, 12], "exclude": [[420, 233], [400, 191]]},
+      {"equation": "2", "page": 5, "content": [100, 267, 177, 25], "exclude": [[150, 307], [150, 250]]},
+      {"equation": "3", "page": 5, "content": [95, 215, 182, 14], "exclude": [[150, 242], [150, 199]]},
+      {"equation": "4", "page": 6, "content": [93, 318, 184, 13], "exclude": [[150, 341], [150, 305]]},
+      {"equation": "5", "page": 6, "content": [32, 195, 245, 28], "exclude": [[150, 238], [150, 179]]},
+      {"equation": "6", "page": 6, "content": [337, 717, 203, 14], "exclude": [[420, 702]]},
+      {"equation": "7", "page": 6, "content": [361, 678, 179, 14], "exclude": [[400, 666]]},
+      {"equation": "8", "page": 6, "content": [336, 381, 204, 16], "exclude": [[420, 408], [420, 365]]},
+      {"equation": "9", "page": 8, "content": [389, 236, 151, 12], "exclude": [[420, 258], [420, 221]]},
+      {"equation": "10", "page": 9, "content": [113, 400, 164, 14], "exclude": [[150, 428], [150, 389]]},
+      {"equation": "11", "page": 10, "content": [348, 198, 192, 12], "exclude": [[420, 220], [420, 183]]},
+      {"equation": "12", "page": 10, "content": [332, 138, 208, 12], "exclude": [[420, 161], [420, 122]]},
+      {"equation": "13", "page": 11, "content": [379, 493, 161, 12], "exclude": [[420, 480]]},
+      {"equation": "14", "page": 11, "content": [365, 443, 175, 13], "exclude": [[420, 434]]},
+      {"equation": "15", "page": 12, "content": [40, 34, 237, 41], "exclude": [[150, 83]]},
+      {"equation": "16", "page": 12, "content": [299, 313, 241, 40], "exclude": [[420, 302], [180, 350]]},
+      {"blockIndex": 1, "page": 8, "content": [27, 332, 161, 22], "exclude": [[150, 367], [150, 320]]}
     ]
   }
 }

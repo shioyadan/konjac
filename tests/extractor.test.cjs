@@ -577,3 +577,169 @@ test('tight code leading preserves descenders above the following prose', () => 
     assert.ok(block && block.rect.y <= 676 && block.rect.y >= 674);
     assert.ok(top(block.rect) < 700);
 });
+
+test('narrow column gutters do not interleave prose or reverse section headings', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(292, 750),
+        text('The left column begins with its own explanation.', 40, 650),
+        text('The right column contains a separate explanation.', 292, 650),
+        text('Left column continuation stays with the left side.', 40, 636),
+        text('Right column continuation stays with the right side.', 292, 636),
+        text('3.1 First section', 40, 610, 140, 12), text('3.2 Second section', 292, 620, 140, 12),
+        ...paragraph(40, 580), ...paragraph(292, 580)]);
+    assert.ok(nodes.some((n) => n.str.includes('explanation. Left column continuation')));
+    assert.ok(!nodes.some((n) => n.str.includes('left column begins') && n.str.includes('right column contains')));
+    assert.ok(nodes.findIndex((n) => n.str === '3.1 First section') < nodes.findIndex((n) => n.str === '3.2 Second section'));
+});
+
+test('a short left-aligned caption retains an image spanning both columns', () => {
+    const panel = {...shape(100, 430, 380, 250), kind: 'image'};
+    const nodes = extract([...paragraph(40, 350), ...paragraph(320, 350), text('Fig. 1. Architecture.', 40, 400, 120, 9)], [panel]);
+    assert.equal(figures(nodes).length, 1);
+    assert.ok(encloses(figures(nodes)[0].rect, panel));
+    assert.ok(figures(nodes)[0].rect.y > 410);
+});
+
+test('a table reference without a corresponding region remains prose', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('The comparison is shown in', 40, 650, 140),
+        text('Table 1. Its values describe the measurements.', 40, 636, 240),
+        text('Further discussion follows in the next section.', 40, 622, 240)]);
+    assert.equal(figures(nodes).length, 0);
+    assert.ok(nodes.some((n) => n.type === 1 && n.str.includes('Table 1. Its values')));
+});
+
+test('prose in the neighboring column cannot block an indented numbered equation', () => {
+    const nodes = extract([...paragraph(60, 750), ...paragraph(60, 540), ...paragraph(310, 660),
+        text('a = b + c', 90, 650, 160), text('(1)', 280, 650, 16)]);
+    assert.equal(equations(nodes).length, 1);
+    assert.ok(encloses(equations(nodes)[0].rect, {x: 90, y: 650, width: 206, height: 8}));
+});
+
+test('unindented piecewise equations keep the case labels and both branches', () => {
+    const body = (items) => items.map((item) => ({...item, fontName: 'body'}));
+    const nodes = extract([...body(paragraph(40, 750)), ...body(paragraph(40, 580)),
+        ...body([text('effsign', 40, 650, 30)]), text('=', 90, 650, 6), text('{', 106, 661, 6),
+        text('1', 120, 656, 6), text('if signprod', 220, 656, 60),
+        text('msb_sum OR msb_carry otherwise', 120, 642, 160)]);
+    assert.equal(equations(nodes).length, 1);
+    assert.ok(encloses(equations(nodes)[0].rect, {x: 40, y: 642, width: 240, height: 25}));
+    assert.ok(nodes.filter((n) => n.type === 1).every((n) => !n.str.includes('effsign')));
+});
+
+test('unmapped ordinary fonts retain bounds and stay marked on later pages', async () => {
+    const symbols = {isType3Font: false, ascent: .75, descent: -.25}, prose = {};
+    const page = (items) => ({getViewport: () => ({width: 600, height: 800, transform: [1, 0, 0, -1, 0, 800]}),
+        getTextContent: async () => ({items}), getOperatorList: async () => ({fnArray: [], argsArray: []}),
+        commonObjs: {get: (name) => name === 'symbols' ? symbols : prose}});
+    await extractPageInputFromPDFPage(page([{...text('\u008a', 40, 600, 6), fontName: 'symbols'}]), 1, {});
+    const result = await extractPageInputFromPDFPage(page([
+        {...text('¼', 40, 600, 6), fontName: 'symbols'}, {...text('að', 60, 600, 10), fontName: 'body'},
+        {...text('¼', 80, 600, 6), transform: [0, 10, -10, 0, 80, 600], fontName: 'symbols'}]), 2, {});
+    assert.equal(result.items[0].unmapped, true);
+    assert.deepEqual(result.items[0].inkRect, {page: 2, kind: 'path', x: 40, y: 597.5, width: 6, height: 10, strokeWidth: 0});
+    assert.equal(result.items[1].unmapped, undefined);
+    assert.equal(result.items[1].str, 'að');
+    assert.deepEqual(result.items[2].inkRect, {page: 2, kind: 'path', x: 72.5, y: 600, width: 10, height: 6, strokeWidth: 0});
+});
+
+test('unmapped brackets identify a numbered multiline equation without guessing its symbols', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 550),
+        {...text('path = square + recode + products', 60, 670, 200), unmapped: true},
+        {...text('+ accumulation + registers', 90, 656, 160), unmapped: true},
+        {...text('ð', 264, 642, 5), unmapped: true}, text('12', 269, 642, 10), {...text('Þ', 279, 642, 5), unmapped: true}]);
+    assert.equal(equations(nodes).length, 1);
+    assert.match(equations(nodes)[0].str, /\(12\)/);
+    assert.ok(encloses(equations(nodes)[0].rect, {x: 60, y: 642, width: 224, height: 36}));
+});
+
+test('small footnotes keep their prose and superscripts in the same paragraph', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 550), ...paragraph(320, 750),
+        text('The right column continues the main discussion.', 320, 650),
+        text('1. This footnote defines', 40, 100, 88, 7), text('x', 128, 100, 4, 7),
+        text('1/2', 132, 103, 7, 5), text('as the square root.', 139, 100, 65, 7),
+        text('Further details follow in this explanatory note.', 40, 91, 170, 7)]);
+    const note = nodes.find((n) => n.type === 1 && n.str.includes('This footnote defines'));
+    assert.ok(note && note.str.includes('as the square root.') && note.inlineImages?.length === 1);
+    assert.ok(!note.str.includes('right column'));
+    assert.ok(note.inlineImages[0].rect.x >= 128 && right(note.inlineImages[0].rect) <= 139);
+    assert.ok(!nodes.some((n) => n.str === '1/2'));
+});
+
+test('Listing captions above and below Python code preserve indentation as a figure', () => {
+    for (const captionY of [680, 620]) {
+        const mono = (str, x, y) => ({...text(str, x, y, str.length * 5), fontName: 'mono', monospace: true});
+        const nodes = extract([...paragraph(40, 750), ...paragraph(40, 580),
+            text('Listing 1: An example function.', 40, captionY, 180, 9),
+            mono('def add(a, b):', 40, 660), mono('return a + b', 60, 646)]);
+        const [listing] = figures(nodes);
+        assert.equal(figures(nodes).length, 1);
+        assert.equal(listing.str, 'Listing 1: An example function.');
+        assert.ok(encloses(listing.rect, {x: 40, y: 644, width: 75, height: 24}));
+        assert.ok(listing.rect.y > 590 && top(listing.rect) < 680);
+        assert.ok(nodes.every((node) => ![6, 9].includes(node.type)));
+        assert.ok(nodes.filter((node) => node.type === 1).every((node) => !/def add|return a/.test(node.str)));
+        listing.imageSrc = 'data:image/png;base64,AA==';
+        assert.match(engine.exports.nodesToHTML(nodes), /<figure><img[^>]+><figcaption>Listing 1: An example function\.<\/figcaption><\/figure>/);
+    }
+});
+
+test('numbered Listings keep separate line numbers, mixed code fonts, comments and blank lines', () => {
+    const code = (str, x, y, font = 'mono') => ({...text(str, x, y, str.length * 5, 9), fontName: font, monospace: true});
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 550),
+        text('Listing 2.1: Accumulation.', 40, 700, 190, 9),
+        {...text('1', 40, 680, 5, 8), fontName: 'serif'}, code('for', 70, 680, 'mono-bold'), code('(i = 0; i < n; ++i) {', 90, 680),
+        {...text('2', 40, 668, 5, 8), fontName: 'serif'}, code('sum += values[i];', 80, 668),
+        {...text('3', 40, 656, 5, 8), fontName: 'serif'}, code('}', 70, 656),
+        code('// A comment after a blank line.', 70, 632),
+        {...text('Ordinary prose resumes immediately after the listing.', 40, 620, 240, 10), fontName: 'serif'}]);
+    const [listing] = figures(nodes);
+    assert.equal(figures(nodes).length, 1);
+    assert.ok(encloses(listing.rect, {x: 40, y: 630, width: 190, height: 58}));
+    assert.ok(listing.rect.y >= 630 && top(listing.rect) < 698);
+    assert.equal(equations(nodes).length, 0);
+    assert.ok(nodes.some((node) => node.type === 1 && node.str.includes('Ordinary prose resumes')));
+});
+
+test('wrapped Listing captions stay outside the code crop and adjacent Listings stay separate', () => {
+    const mono = (str, y) => ({...text(str, 40, y, str.length * 5, 9), fontName: 'mono', monospace: true});
+    const caption = (str, y) => ({...text(str, 40, y, 200, 9), fontName: 'serif'});
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 500),
+        caption('Listing 1: A sample with a caption that', 700), caption('continues onto the next line.', 688),
+        mono('def first():', 670), mono('    return 1', 658),
+        caption('Listing 2: Another sample.', 630), mono('def second():', 612), mono('    return 2', 600)]);
+    assert.equal(figures(nodes).length, 2);
+    assert.equal(figures(nodes)[0].str, 'Listing 1: A sample with a caption that continues onto the next line.');
+    assert.ok(top(figures(nodes)[0].rect) < 686 && figures(nodes)[0].rect.y > 642);
+    assert.ok(top(figures(nodes)[1].rect) < 630 && figures(nodes)[1].rect.y < 600);
+});
+
+test('a Listing reference without adjacent code remains prose', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 550),
+        text('The implementation is described in', 40, 650, 200),
+        text('Listing 1. Its behavior is discussed below.', 40, 636, 240),
+        text('The next section compares the experimental results.', 40, 622, 240)]);
+    assert.equal(figures(nodes).length, 0);
+    assert.ok(nodes.some((node) => node.type === 1 && node.str.includes('Listing 1. Its behavior')));
+});
+
+test('Listings keep neighboring-column prose outside the image', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(320, 750), ...paragraph(40, 550),
+        text('Listing 1: A short example.', 40, 680, 180, 9), ...paragraph(320, 660),
+        {...text('def example():', 40, 660, 100, 9), fontName: 'mono', monospace: true},
+        {...text('return 1', 60, 648, 50, 9), fontName: 'mono', monospace: true}]);
+    const [listing] = figures(nodes);
+    assert.ok(listing && encloses(listing.rect, {x: 40, y: 647, width: 100, height: 20}));
+    assert.ok(right(listing.rect) < 320);
+});
+
+test('a Listing preserves code descenders just above proportional prose', () => {
+    const body = (str, y) => ({...text(str, 40, y), fontName: 'serif', fontAscent: .7});
+    const nodes = extract([...paragraph(40, 750).map((line) => ({...line, fontName: 'serif'})),
+        {...text('Listing 1: Compiler options.', 40, 700, 150, 9), fontName: 'serif'},
+        {...text('OPTIONS = -g', 40, 689, 72), fontName: 'mono', monospace: true},
+        {...text('-fdebug', 40, 678, 42), fontName: 'mono', monospace: true},
+        body('The following paragraph explains these options.', 667)]);
+    const [listing] = figures(nodes);
+    assert.ok(listing && listing.rect.y <= 676 && listing.rect.y >= 674);
+    assert.ok(top(listing.rect) < 700);
+});
