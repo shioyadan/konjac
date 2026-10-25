@@ -760,3 +760,111 @@ test('debug masks show actual body boundaries without changing extraction', () =
     assert.match(svg, /<rect x="40" y="699\.5" width="240" height="40\.5"\/>/);
     assert.ok(logs.some((line) => line.includes('region: result')));
 });
+
+test('a wrapped parenthesized number remains prose and preserves following paragraphs', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('The capacity is larger than the standard window (for example,', 50, 650, 230),
+        text('256) and allows more instructions to execute.', 40, 636, 190),
+        text('Register allocation is described in the next paragraph.', 50, 622, 230),
+        text('1) Allocate a physical register for the result.', 50, 580, 225),
+        text('2) Update the mapping for subsequent instructions.', 50, 566, 225)]);
+    const prose = nodes.filter((n) => n.type === 1).map((n) => n.str);
+    assert.ok(prose.includes('The capacity is larger than the standard window (for example, 256) and allows more instructions to execute.'));
+    assert.ok(prose.includes('Register allocation is described in the next paragraph.'));
+    assert.ok(prose.includes('1) Allocate a physical register for the result.'));
+    assert.ok(prose.includes('2) Update the mapping for subsequent instructions.'));
+});
+
+test('a paragraph following a bullet is separate even when their left edges align', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('• A controller connected to the heating equipment', 50, 650, 220),
+        text('We conducted experiments using several processors.', 50, 624, 230),
+        text('The measurements were repeated for every device.', 40, 610, 240)]);
+    assert.ok(nodes.some((n) => n.str === '• A controller connected to the heating equipment'));
+    assert.ok(nodes.some((n) => n.str === 'We conducted experiments using several processors. The measurements were repeated for every device.'));
+});
+
+test('run-in headings precede and do not fragment their following prose', () => {
+    for (const offset of [0, 0.001]) {
+        const nodes = extract([...paragraph(40, 750),
+            text('3.2. Request Handling', 40, 650, 140),
+            text('Memory requests had', 185, 650 + offset, 95),
+            text('to be handled differently from other operations.', 40, 636, 240)]);
+        const heading = nodes.findIndex((n) => n.type === 3 && n.str === '3.2. Request Handling');
+        assert.ok(heading >= 0);
+        assert.equal(nodes[heading + 1].str, 'Memory requests had to be handled differently from other operations.');
+    }
+});
+
+test('a parenthesized acronym does not end a paragraph at a column break', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(320, 650),
+        text('An associative structure called the load queue (LQ)', 40, 100, 240),
+        text('must be used to preserve the correct memory ordering.', 320, 750, 240),
+        text('This requirement applies to all the pending requests.', 320, 736, 240)]);
+    assert.ok(nodes.some((n) => n.str.includes('load queue (LQ) must be used')));
+    assert.ok(!nodes.some((n) => n.str.includes('load queue (LQ)') && n.str.includes('Ordinary prose')));
+});
+
+test('narrow indented prose continues across pages without splitting on each line', () => {
+    const nodes = extractNodesFromPages([
+        {width: 600, height: 800, items: [...paragraph(40, 750), ...paragraph(320, 750),
+            text('If two independent operations were', 360, 100, 190)]},
+        {width: 600, height: 800, items: [text('performed, several extra steps would', 80, 750, 190),
+            text('be needed to produce the final result.', 80, 736, 190), ...paragraph(40, 650), ...paragraph(320, 650)]}
+    ]);
+    assert.ok(nodes.some((n) => n.str === 'If two independent operations were performed, several extra steps would be needed to produce the final result.'));
+});
+
+test('skipping figure labels does not merge a footnote into the next column', () => {
+    const nodes = extract([...paragraph(40, 430), ...paragraph(320, 430),
+        text('Figure 1. A full-width diagram.', 40, 500, 430, 9),
+        text('Left label', 100, 600, 80, 8), text('Right label', 360, 600, 80, 8),
+        text('1. This footnote explains the implementation.', 40, 100, 230, 8)],
+        [shape(40, 540, 520, 100)]);
+    const note = nodes.find((n) => n.type === 1 && n.str.includes('This footnote'));
+    assert.ok(note);
+    assert.ok(!note.str.includes('Ordinary prose'));
+});
+
+test('rotated labels inside a figure do not leak into standalone paragraphs', () => {
+    const nodes = extract([...paragraph(40, 710), ...paragraph(40, 330),
+        text('Figure 1. Diagram.', 40, 390, 230, 9),
+        {...text('\u001c\u001b', 260, 500, 40, 8), unmapped: true,
+            inkRect: {page: 2, kind: 'path', x: 252, y: 500, width: 8, height: 40, strokeWidth: 0}}],
+        [shape(55, 430, 210, 200)]);
+    assert.equal(figures(nodes).length, 1);
+    assert.ok(nodes.every((node) => !node.inlineImages?.length));
+});
+
+test('short complete descriptions and alternate bullet glyphs remain separate items', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('Low mode uses less energy.', 50, 650, 170),
+        text('High mode provides more throughput.', 50, 636, 180),
+        text('\uf0b7 First option', 50, 580, 80), text('\uf0b7 Second option', 50, 566, 90),
+        text('▪ Another option', 50, 540, 95), text('▪ Final option', 50, 526, 75)]);
+    for (const str of ['Low mode uses less energy.', 'High mode provides more throughput.',
+        '\uf0b7 First option', '\uf0b7 Second option', '▪ Another option', '▪ Final option']) {
+        assert.ok(nodes.some((node) => node.str === str), str);
+    }
+    const html = engine.exports.nodesToHTML(nodes);
+    assert.match(html, /<li>First option<\/li>/);
+    assert.match(html, /<li>Final option<\/li>/);
+});
+
+test('centered page numbers and publication footers do not interrupt continued prose', () => {
+    const pages = [1, 2, 3].map((page) => ({width: 600, height: 800, items: [
+        ...paragraph(40, 750), text('A complete sentence introduces this paragraph. Like other designs,', 50, 110, 230),
+        text(String(page), 297, 45, 6), text('978-1-2345-6789-0/10/$25.00 ©2010 Publisher', 40, 45, 220, 8)]}));
+    pages[1].items.unshift(text('Acronyms may start the continued explanation.', 40, 780, 240));
+    const nodes = extractNodesFromPages(pages);
+    assert.ok(nodes.every((node) => !/^\d+$/.test(node.str) && !node.str.includes('978-')));
+    assert.ok(nodes.some((node) => node.str.includes('Like other designs, Acronyms may start')));
+});
+
+test('wide centered labels and complete statements do not join prose in the next column', () => {
+    const nodes = extract([...paragraph(40, 650), ...paragraph(320, 650),
+        text('Measurements across configurations (relative error)', 180, 100, 280),
+        text('the remaining measurements are discussed here.', 320, 750, 240)]);
+    assert.ok(nodes.some((node) => node.str === 'Measurements across configurations (relative error)'));
+    assert.ok(nodes.some((node) => node.str.startsWith('the remaining measurements')));
+});

@@ -915,7 +915,8 @@ function estimatePageMetrics(lines: TextLine[], pages: Array<unknown[] | PDF_Pag
 function isPageDecoration(line: TextLine, metric?: PageMetrics) {
     let text = line.text.trim();
     return (
-        /^\d+$/.test(text) && line.fontSize <= 12 && (!metric || line.y < 36 || line.y > metric.height - 36) ||
+        /^\d+$/.test(text) && line.fontSize <= 12 && (!metric || line.y <= 36 + LINE_Y_EPSILON || line.y >= metric.height - 36 - LINE_Y_EPSILON) ||
+        metric && line.y < metric.height * 0.09 && /^97[89][\d-]+\/.*\$\d/.test(text) ||
         /Authorized licensed use limited to:|IEEE Xplore\. Restrictions apply\./.test(text) ||
         /^(?:IEEE Micro|Published by the IEEE Computer Society|March\/April \d{4}|COOL CHIPS)(?:\s+|$)/.test(text) ||
         /^0?272-1732\b/.test(text) ||
@@ -930,7 +931,7 @@ function repeatedPageDecorations(lines: TextLine[], metrics: Map<number, PageMet
     let candidates = lines.filter((line) => {
         let metric = metrics.get(line.page)!;
         return (line.y > metric.height * 0.88 || line.y < metric.height * 0.09) &&
-            (Math.abs(line.x - metric.minX) < bodyFontSize || Math.abs(line.x + line.width - metric.maxX) < bodyFontSize) &&
+            (/^\d+$/.test(line.text) || Math.abs(line.x - metric.minX) < bodyFontSize || Math.abs(line.x + line.width - metric.maxX) < bodyFontSize) &&
             !lines.some((other) => other.page == line.page && (line.y > metric.height / 2
                 ? other.y > line.y + bodyFontSize : other.y < line.y - bodyFontSize));
     });
@@ -1593,18 +1594,19 @@ function sortLinesForReading(lines: TextLine[]) {
     for (let page of pages) {
         let pageLines = lines.filter((line) => line.page == page);
         let centerX = estimateColumnSplitX(pageLines);
-        let byY = (a: TextLine, b: TextLine) => b.y - a.y || a.x - b.x;
+        let byY = (items: TextLine[]) => groupByBaseline(items, LINE_Y_EPSILON)
+            .flatMap((row) => row.sort((a, b) => a.x - b.x));
         let span = Math.max(...pageLines.map((line) => line.x + line.width)) - Math.min(...pageLines.map((line) => line.x));
         // 図だけのページは短いキャプションしかないため、幅の広い本文がある場合に単段と確定する。
         let wideBody = pageLines.some((line) => line.width > span * 0.7 && line.text.length > 55 && !isMathFragment(line.text));
         if (wideBody && !pageLooksTwoColumn(pageLines, centerX)) {
-            result.push(...pageLines.sort(byY));
+            result.push(...byY(pageLines));
             continue;
         }
         let left = pageLines.filter((line) => line.x < centerX);
         let right = pageLines.filter((line) => line.x >= centerX);
 
-        result.push(...left.sort(byY), ...right.sort(byY));
+        result.push(...byY(left), ...byY(right));
     }
 
     return result;
@@ -1638,43 +1640,31 @@ function shouldStartParagraph(
         return true;
     }
 
-    let paragraphIsListItem = isListItemStart(paragraph);
-    let lineIsListItem = isListItemStart(line.text);
-    if (paragraphIsListItem && !lineIsListItem) {
-        let lineGap = prevLine.y - line.y;
-        let widerThanWrappedLine = lineGap > Math.max(11.5, prevLine.fontSize * 1.25, line.fontSize * 1.25);
-        // 箇条書きの後続行は深いインデントになりやすい。左端が本文側へ戻り、
-        // かつ通常の折り返し行より行間が広い場合だけ、箇条書き後の段落とみなす。
-        if (line.x < prevLine.x - 4 && widerThanWrappedLine) {
-            return true;
-        }
-        return false;
+    // 折り返された括弧内の数値を、番号付き箇条書きの開始と誤認しない。
+    let lineIsListItem = isListItemStart(line.text) && !(/^\d+\)/.test(line.text.trim()) &&
+        paragraph.split("(").length > paragraph.split(")").length);
+    if (lineIsListItem) return true;
+
+    // 行頭見出しの後の本文は右へ寄るため、左端だけで別の段と判定しない。
+    let overlap = Math.min(line.x + line.width, prevLine.x + prevLine.width) - Math.max(line.x, prevLine.x);
+    let sameColumn = overlap >= Math.min(line.width, prevLine.width) * 0.5;
+    if (line.page != prevLine.page || !sameColumn) {
+        return !(prevLine.text.endsWith("-") ||
+            !/[.!?]["')\]]*$/.test(paragraph.trim()) &&
+            (startsLikeParagraphContinuation(line.text) || /,$/.test(paragraph.trim())));
     }
 
-    if (lineIsListItem) {
-        return true;
-    }
-
-    if (line.page != prevLine.page) {
-        // ページをまたぐ場合は、行末と次行から継続が明確なときだけ同じ段落にする。
-        return !(
-            prevLine.text.endsWith("-") ||
-            !paragraphEndsWithSentenceStop(paragraph) && startsLikeParagraphContinuation(line.text)
-        );
-    }
-
-    let sameColumn = Math.abs(line.x - prevLine.x) < columnWidth * 0.5;
-    if (!sameColumn) {
-        return true;
-    }
-
-    if (prevLine.y - line.y > line.fontSize * 1.8) {
-        return true;
+    let lineGap = prevLine.y - line.y;
+    if (lineGap > Math.max(line.fontSize, prevLine.fontSize) * 1.8) return true;
+    if (isListItemStart(paragraph)) {
+        return line.x < prevLine.x - 4 && lineGap > Math.max(11.5, prevLine.fontSize * 1.25, line.fontSize * 1.25);
     }
 
     let indented = line.x - prevLine.x > 5;
-    let prevLineIsShort = prevLine.width < columnWidth * 0.82;
-
+    // 狭い字下げ領域の折り返しを短い段落末尾と誤認しないよう、次行の右端と比べる。
+    let prevLineIsShort = prevLine.width < columnWidth * 0.82 &&
+        (paragraphEndsWithSentenceStop(prevLine.text) || !startsLikeParagraphContinuation(line.text)) ||
+        prevLine.x + prevLine.width < line.x + line.width - columnWidth * 0.18;
     return (indented || prevLineIsShort) && !prevLine.text.endsWith("-");
 }
 
@@ -1707,8 +1697,10 @@ function startsLikeNewBlock(text: string) {
     );
 }
 
+const BULLET_ITEM_PATTERN = /^[•‣❯●◦▪\uf0b7]\s+(.+)$/s;
+
 function isListItemStart(text: string) {
-    return /^(?:[•‣❯]|\d+[.)])\s+/.test(text.trim());
+    return BULLET_ITEM_PATTERN.test(text.trim()) || /^\d+[.)]\s+/.test(text.trim());
 }
 
 function isReferenceEntryStart(text: string) {
@@ -2049,39 +2041,6 @@ function estimateBodyLayout(lines: TextLine[], bodyFontSize: number, columnWidth
 function distinctBodyColumns(layout: BodyLayoutModel, columnWidth: number) {
     return layout.columns.filter((column) => !layout.columns.some((other) => other.page == column.page &&
         other.x < column.x && column.x - other.x < columnWidth * 0.5));
-}
-
-function looksLikeBodyLine(line: TextLine, bodyFontSize: number) {
-    return (
-        line.fontSize >= bodyFontSize - 1.2 ||
-        isCaptionLine(line) ||
-        isHeadingLine(line, bodyFontSize)
-    );
-}
-
-function lineHorizontallyRelated(a: TextLine, b: TextLine, columnWidth: number) {
-    let aRight = a.x + a.width;
-    let bRight = b.x + b.width;
-    let overlap = Math.min(aRight, bRight) - Math.max(a.x, b.x);
-
-    return overlap > -columnWidth * 0.2 || Math.abs(a.x - b.x) < columnWidth * 0.65;
-}
-
-// インライン数式の上付き・下付きは小さい行として抽出されることがある。
-// 近くに本文サイズの行があれば、行自体は捨てても段落継続状態は保つ。
-function nearBodyLine(
-    line: TextLine,
-    other: TextLine | null | undefined,
-    bodyFontSize: number,
-    columnWidth: number
-) {
-    return (
-        other != null &&
-        other.page == line.page &&
-        Math.abs(other.y - line.y) < bodyFontSize * 1.8 &&
-        lineHorizontallyRelated(line, other, columnWidth) &&
-        looksLikeBodyLine(other, bodyFontSize)
-    );
 }
 
 function isPullQuoteLine(line: TextLine, bodyFontSize: number) {
@@ -3075,8 +3034,10 @@ function lineCenterInsideRect(line: TextLine, rect: PDF_Rect) {
         return false;
     }
 
-    let centerX = line.x + line.width / 2;
-    let centerY = line.y + line.fontSize / 2;
+    // 回転した文字など、描画範囲が分かる行は文字幅の概算より実際の位置を優先する。
+    let ink = line.parts.every((part) => part.inkRect) ? unionRects(line.parts.map((part) => part.inkRect!)) : null;
+    let centerX = ink ? ink.x + ink.width / 2 : line.x + line.width / 2;
+    let centerY = ink ? ink.y + ink.height / 2 : line.y + line.fontSize / 2;
     return (
         centerX >= rect.x &&
         centerX <= rect.x + rect.width &&
@@ -3306,7 +3267,6 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     let titleLines: TextLine[] = [];
     let paragraph = "";
     let paragraphLines: TextLine[] = [];
-    let prevTextLine: TextLine | null = null;
     let inReferencesSection = false;
 
     // 複数行に分かれたタイトルを 1 つのノードにまとめる。
@@ -3336,12 +3296,10 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             flushTitle();
             flushParagraph();
             nodes.push(block.node);
-            prevTextLine = null;
             continue;
         }
 
         if (metadata.ignoredLines.has(line)) {
-            prevTextLine = null;
             continue;
         }
 
@@ -3350,7 +3308,6 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             displayLines.has(line) ||
             figureRects.some((rect) => lineCenterInsideRect(line, rect))
         ) {
-            prevTextLine = null;
             continue;
         }
 
@@ -3360,14 +3317,6 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
         if (!inReferencesSection && (isPullQuoteLine(line, bodyFontSize) ||
             line.fontSize < bodyFontSize - 1.2 && !smallProse && !isHeadingLine(line, bodyFontSize, relaxedHeading) &&
             !isDisplayMathLine(line, columnWidth))) {
-            let prevLine = i > 0 ? readingLines[i - 1] : null;
-            let nextLine = readingLines[i + 1];
-            if (
-                !nearBodyLine(line, prevLine, bodyFontSize, columnWidth) &&
-                !nearBodyLine(line, nextLine, bodyFontSize, columnWidth)
-            ) {
-                prevTextLine = null;
-            }
             continue;
         }
 
@@ -3375,7 +3324,6 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             flushParagraph();
             title = appendLineText(title, line.text);
             titleLines.push(line);
-            prevTextLine = null;
             inReferencesSection = false;
         }
         else if (isHeadingLine(line, bodyFontSize, relaxedHeading)) {
@@ -3396,17 +3344,15 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
                 i++;
             }
             nodes.push(new PDF_Node(heading, PDF_NodeType.HEADING, undefined, sourceRectFromLines(headingLines)));
-            prevTextLine = null;
             inReferencesSection = isReferencesHeading(heading);
         }
         else {
             flushTitle();
-            if (shouldStartParagraph(line, prevTextLine, columnWidth, paragraph, inReferencesSection)) {
+            if (shouldStartParagraph(line, paragraphLines[paragraphLines.length - 1] ?? null, columnWidth, paragraph, inReferencesSection)) {
                 flushParagraph();
             }
             paragraph = appendLineText(paragraph, line.text);
             paragraphLines.push(line);
-            prevTextLine = line;
         }
     }
 
@@ -3609,13 +3555,13 @@ export function linkedNodeHTML(node: PDF_Node, context: HTMLLinkContext) {
     return html;
 }
 
-// 連続する中黒付き本文だけを HTML の itemize へ変換するため、表示する項目本文を取り出す。
+// 箇条書きの検出と表示で、同じ行頭記号を使う。
 export function bulletListItemText(node: PDF_Node) {
     if (node.type != PDF_NodeType.TEXT) {
         return null;
     }
 
-    let match = node.str.match(/^•\s+(.+)$/s);
+    let match = node.str.trim().match(BULLET_ITEM_PATTERN);
     return match?.[1] ?? null;
 }
 

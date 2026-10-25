@@ -32,6 +32,8 @@ for (const name of Object.keys(specs)) {
     }
     for (const text of spec.prose || []) assert.ok(nodes.some((node) => node.type === 1 && node.str.includes(text)),
         `${file}: fragmented or reordered prose: ${text}`);
+    for (const text of spec.paragraphStarts || []) assert.ok(nodes.some((node) => node.type === 1 && node.str.startsWith(text)),
+        `${file}: paragraph merged into preceding content: ${text}`);
     if (spec.readableMath) assert.ok(nodes.filter((node) => node.type !== 6).every((node) =>
         !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f�]/.test(node.str)), `${file}: unreadable math in prose or captions`);
     for (const node of nodes) {
