@@ -96,6 +96,10 @@ export class PDF_Node {
     // CLI/viewer が rect から生成した画像。extractor 自体は画像生成を行わない。
     imageSrc?: string;
     inlineImages?: PDF_InlineImage[];
+    // 箇条書きの段左端からの字下げ。フォントサイズで正規化し、段・ページをまたいでも比較する。
+    listIndent?: number;
+    // 本文より小さい文字でページ下部に置かれた注記。文献番号とは区別する。
+    footnote?: boolean;
 
     constructor(str: string, type: PDF_NodeType, rect?: PDF_Rect, sourceRect?: PDF_Rect) {
         this.str = str;
@@ -170,6 +174,7 @@ interface TextLine {
     fontSize: number;
     // この行を構成する元の文字片。
     parts: TextPart[];
+    listIndent?: number;
 }
 
 // ページごとの大きさと本文領域の概算。
@@ -931,14 +936,14 @@ function repeatedPageDecorations(lines: TextLine[], metrics: Map<number, PageMet
     let candidates = lines.filter((line) => {
         let metric = metrics.get(line.page)!;
         return (line.y > metric.height * 0.88 || line.y < metric.height * 0.09) &&
-            (/^\d+$/.test(line.text) || Math.abs(line.x - metric.minX) < bodyFontSize || Math.abs(line.x + line.width - metric.maxX) < bodyFontSize) &&
+            (line.y < bodyFontSize * 3 || /^\d+$/.test(line.text) || Math.abs(line.x - metric.minX) < bodyFontSize || Math.abs(line.x + line.width - metric.maxX) < bodyFontSize) &&
             !lines.some((other) => other.page == line.page && (line.y > metric.height / 2
                 ? other.y > line.y + bodyFontSize : other.y < line.y - bodyFontSize));
     });
     let key = (line: TextLine) => line.text.replace(/\d+/g, "#");
     return new Set(candidates.filter((line) => new Set(candidates.filter((other) =>
         key(other) == key(line) && Math.abs(other.y - line.y) < bodyFontSize * 0.5 &&
-        Math.abs(other.x - line.x) < bodyFontSize).map((other) => other.page)).size >= 3));
+        Math.abs(other.x - line.x) < bodyFontSize).map((other) => other.page)).size >= (line.y < bodyFontSize * 3 ? 2 : 3)));
 }
 
 const CAPTION_NUMBER_PATTERN = "(?:\\d+(?:\\.\\d+)*|[IVXLCDM]+)";
@@ -986,7 +991,7 @@ function isTitleLine(line: TextLine, bodyFontSize: number) {
 function looksLikeAffiliationText(text: string) {
     return (
         /(?:\b(?:University|Institute|Institution|Corporation|Laborator(?:y|ies)|Research\s+Center|Centre|School|College|Department|Faculty|Engineering|Email)\b|\bDept\.)/i.test(text) ||
-        /^(?:AMD|IBM|Intel|RIKEN|MIT)\b/.test(text.trim()) ||
+        /^(?:AMD|IBM|Intel|RIKEN|MIT|Campus)\b/.test(text.trim()) || /^[A-Z]{2,}(?:\/[A-Z]{2,})+$/.test(text.trim()) ||
         /@|https?:|[{}]|\b(?:USA|Japan|Belgium|Germany)\b|,\s*[A-Z]{2}(?:\s|,|$)|\b\d{4,}\b/.test(text)
     );
 }
@@ -1010,7 +1015,7 @@ function looksLikeAuthorText(text: string) {
 
     let tokens = cleaned.split(/[\s,]+/).filter((token) => token != "");
     let nameTokens = tokens.filter((token) =>
-        /^(?:[A-Z][A-Za-z'’\-]+|[A-Z]\.|Jr\.?|Sr\.?)$/.test(token)
+        /^(?:\p{Lu}[\p{L}\p{M}'’´`˜\-]+|\p{Lu}\.|Jr\.?|Sr\.?)$/u.test(token)
     ).length;
     let allowedTokens = nameTokens + tokens.filter((token) => /^(?:and|&|van|von|de|da|del)$/i.test(token)).length;
     return nameTokens >= 2 && allowedTokens >= Math.max(2, tokens.length * 0.55);
@@ -1110,10 +1115,12 @@ function collectDocumentMetadata(
     let selectedTitleGroups = tiedTitleGroups;
     if (
         tiedTitleGroups.length == 1 &&
-        metric.height - Math.max(...tiedTitleGroups[0].map((line) => line.y)) < bodyFontSize * 1.2
+        tiedTitleGroups[0].length == 1 &&
+        metric.height - tiedTitleGroups[0][0].y < metric.height * 0.08
     ) {
         let lowerGroup = rankedTitleGroups.find((group) =>
             group != tiedTitleGroups[0] &&
+            !group.every((line) => looksLikeAuthorText(line.text)) &&
             Math.max(...group.map((line) => line.y)) < Math.min(...tiedTitleGroups[0].map((line) => line.y)) &&
             titleFontSize - median(group.map(lineDominantFontSize), 0) <= 2.5
         );
@@ -1144,7 +1151,8 @@ function collectDocumentMetadata(
             }
             continue;
         }
-        if (authorStarted && looksLikeAffiliationText(line.text)) {
+        if (authorStarted && authorLines.some((author) =>
+            Math.min(author.x + author.width, line.x + line.width) > Math.max(author.x, line.x))) {
             authorEnded = true;
         }
     }
@@ -1204,15 +1212,15 @@ function isAbstractHeading(text: string) {
 }
 
 function isReferencesHeading(text: string) {
-    return /^(?:REFERENCES|References)$/.test(text);
+    return /^(?:REFERENCES|References):?$/.test(text);
 }
 
 function isAcknowledgementsHeading(text: string) {
-    return /^(?:ACKNOWLEDGEMENTS?|Acknowledgements?)$/.test(text);
+    return /^(?:ACKNOWLEDGEMENTS?|Acknowledgements?|ACKNOWLEDGMENTS?|Acknowledgments?):?$/.test(text);
 }
 
 function arabicSectionNumbers(text: string) {
-    let match = text.match(/^(\d+(?:\.\d+)*\.?)\s+([A-Z][A-Za-z0-9 .&()/\-]+)$/);
+    let match = text.match(/^(\d+(?:\.\d+)*\.?)\s+([A-Z][A-Za-z0-9 .,?&()/\-]+)$/);
     if (!match) {
         return null;
     }
@@ -1231,11 +1239,11 @@ function isArabicSectionHeading(text: string) {
 }
 
 function isRomanSectionHeading(text: string) {
-    return /^[IVX]+\.\s+[A-Z][A-Za-z0-9 .&()/\-]+$/.test(text);
+    return /^[IVX]+\.\s+[A-Z][A-Za-z0-9 .,?&()/\-]+$/.test(text);
 }
 
 function isLetteredSectionHeading(text: string) {
-    return /^[A-Z]\.\s+[A-Z0-9][A-Za-z0-9 .&()/\-]+$/.test(text);
+    return /^[A-Z]\.\s+[A-Z0-9][A-Za-z0-9 .,?&()/\-]+$/.test(text);
 }
 
 // 1., 1 Introduction, 2.1, IV., A. などの章・節番号付き見出しだけを拾う。
@@ -1281,9 +1289,10 @@ function isHeadingLine(line: TextLine, bodyFontSize: number, relaxed = false) {
 
     return (
         line.fontSize >= bodyFontSize + 1.5 &&
+        line.text.length < 100 &&
         !/^\d/.test(line.text) &&
         !/[$+]/.test(line.text) &&
-        /^[A-Z][A-Z0-9 .&()/\-]+$/.test(line.text)
+        /^[A-Z][A-Za-z0-9 ,&()/\-]+$/.test(line.text)
     );
 }
 
@@ -1310,7 +1319,7 @@ function looksLikeHeadingContinuation(headText: string, text: string) {
     let headEndsWithFragment = /^[A-Z]$/.test(lastHeadWord) || /\d/.test(lastHeadWord);
 
     return (
-        /^[A-Z0-9][A-Z0-9&()/\-]*$/.test(firstWord) && firstWord.length > 1 ||
+        /^[A-Z0-9-][A-Z0-9&()/\-]*$/.test(firstWord) && firstWord.length > 1 ||
         /\b[A-Z]$/.test(headText) && /^[a-z]/.test(firstWord) ||
         headEndsWithFragment && /^[A-Z][a-z]/.test(firstWord) ||
         headEndsWithFragment && /^-/.test(firstWord) ||
@@ -1327,6 +1336,15 @@ function isSameLineHeadingContinuation(line: TextLine, nextLine: TextLine, bodyF
         Math.abs(nextLine.fontSize - line.fontSize) <= 1.2 &&
         nextLine.text.length <= 50 &&
         /^[A-Z][A-Za-z0-9 &()/\-]+$/.test(nextLine.text);
+}
+
+function isWrappedHeadingContinuation(line: TextLine, next: TextLine, bodyFontSize: number) {
+    return next.page == line.page && line.y - next.y > LINE_Y_EPSILON &&
+        line.y - next.y < line.fontSize * 1.6 && Math.abs(line.fontSize - next.fontSize) < 0.5 &&
+        (Math.abs(line.x - next.x) < 2 || Math.abs(line.x + line.width / 2 - next.x - next.width / 2) < bodyFontSize) &&
+        next.parts.every((part) => line.parts.some((first) => first.fontName == part.fontName)) &&
+        !isNumberedSectionHeading(next.text) && !isHeadingText(next.text) &&
+        (line.fontSize >= bodyFontSize + 1.5 ? /^[A-Z][A-Za-z0-9 &()/\-]+$/ : /^[A-Z][A-Z0-9 &()/\-]+$/).test(next.text);
 }
 
 // 見出しと本文が同じ PDF 行に載っている場合に分割する。
@@ -1624,7 +1642,8 @@ function shouldStartParagraph(
         return false;
     }
     // 脚注と本文を、箇条書きの継続や段・ページの移動を理由に結合しない。
-    if (Math.abs(lineDominantFontSize(line) - lineDominantFontSize(prevLine)) > 1.2) return true;
+    let fontSize = lineDominantFontSize(line), prevFontSize = lineDominantFontSize(prevLine);
+    if (!inReferencesSection && Math.abs(fontSize - prevFontSize) > Math.max(0.5, Math.min(fontSize, prevFontSize) * 0.08)) return true;
 
     if (
         isLikelyStandaloneReferenceEntryStart(paragraph, inReferencesSection) &&
@@ -1651,7 +1670,7 @@ function shouldStartParagraph(
     if (line.page != prevLine.page || !sameColumn) {
         return !(prevLine.text.endsWith("-") ||
             !/[.!?]["')\]]*$/.test(paragraph.trim()) &&
-            (startsLikeParagraphContinuation(line.text) || /,$/.test(paragraph.trim())));
+            (isListItemStart(paragraph) || startsLikeParagraphContinuation(line.text) || /,$/.test(paragraph.trim())));
     }
 
     let lineGap = prevLine.y - line.y;
@@ -1714,7 +1733,7 @@ function isLikelyStandaloneReferenceEntryStart(text: string, inReferencesSection
     }
 
     let remainder = text.trim().replace(/^(?:\[\d+\]|\d+\.)\s+/, "");
-    return inReferencesSection || !/^[a-z]/.test(remainder);
+    return inReferencesSection || /^\[\d+\]/.test(text.trim()) && !/^[a-z]/.test(remainder);
 }
 
 // 図中の目盛りやベンチマーク名の列は数字・記号・短い識別子から始まりやすい。
@@ -1798,7 +1817,8 @@ function continuesCaption(caption: string, first: TextLine, prev: TextLine, next
 
 // 図表を挟んだ前後の TEXT ノードが、同じ段落から分断されたものかを保守的に判定する。
 function looksLikeInterruptedParagraph(before: string, after: string) {
-    if (before.trim() == "" || after.trim() == "" || startsLikeNewBlock(after)) {
+    if (before.trim() == "" || after.trim() == "" || startsLikeNewBlock(after) ||
+        isReferenceEntryStart(before) && isReferenceEntryStart(after)) {
         return false;
     }
 
@@ -1825,57 +1845,57 @@ function looksLikeInterruptedParagraph(before: string, after: string) {
     );
 }
 
-// 図表が段落の途中に挿入された場合、本文を結合して図表を段落の直後へ寄せる。
-function moveInterruptedFiguresAfterParagraphs(nodes: PDF_Node[]) {
+// 図表・脚注が段落の途中に挿入された場合、本文を結合してそれらを段落の直後へ寄せる。
+function moveInterruptionsAfterParagraphs(nodes: PDF_Node[]) {
     let result: PDF_Node[] = [];
 
     for (let i = 0; i < nodes.length; i++) {
         let node = nodes[i];
-        if (node.type != PDF_NodeType.TEXT) {
+        if (node.type != PDF_NodeType.TEXT || node.footnote) {
             result.push(node);
             continue;
         }
 
         let text = node.str;
-        let delayedFigures: PDF_Node[] = [];
+        let delayed: PDF_Node[] = [];
         let cursor = i;
 
         while (true) {
-            // TEXT の直後に連続する FIGURE 群を探し、その次が続きの TEXT なら本文を先に結合する。
-            let figureStart = cursor + 1;
-            let nextTextIndex = figureStart;
-            while (nodes[nextTextIndex]?.type == PDF_NodeType.FIGURE) {
+            let start = cursor + 1;
+            let nextTextIndex = start;
+            while (nodes[nextTextIndex]?.type == PDF_NodeType.FIGURE || nodes[nextTextIndex]?.footnote) {
                 nextTextIndex++;
             }
 
-            let figures = nodes.slice(figureStart, nextTextIndex);
+            let interruptions = nodes.slice(start, nextTextIndex);
             let nextText = nodes[nextTextIndex];
             if (
-                figures.length == 0 ||
+                interruptions.length == 0 ||
                 !nextText ||
                 nextText.type != PDF_NodeType.TEXT ||
-                (node.sourceRect?.page != nextText.sourceRect?.page && !text.trim().endsWith("-")) ||
+                (node.sourceRect?.page != nextText.sourceRect?.page && !text.trim().endsWith("-") && !isListItemStart(text)) ||
                 !looksLikeInterruptedParagraph(text, nextText.str)
             ) {
                 break;
             }
 
             text = appendLineText(text, nextText.str);
-            delayedFigures.push(...figures);
+            delayed.push(...interruptions);
             cursor = nextTextIndex;
         }
 
-        // 図表を後ろへ寄せたことで、続けて隣接した TEXT も同じ段落ならまとめる。
+        // 隣接した本文も同じ段落ならまとめる。
         while (
-            delayedFigures.length > 0 &&
+            delayed.length > 0 &&
             nodes[cursor + 1]?.type == PDF_NodeType.TEXT &&
+            !nodes[cursor + 1].footnote &&
             looksLikeInterruptedParagraph(text, nodes[cursor + 1].str)
         ) {
             text = appendLineText(text, nodes[cursor + 1].str);
             cursor++;
         }
 
-        result.push(new PDF_Node(text, PDF_NodeType.TEXT, undefined, node.sourceRect), ...delayedFigures);
+        result.push({...node, str: text}, ...delayed);
         i = cursor;
     }
 
@@ -1891,7 +1911,11 @@ function mergeAdjacentTextFragments(nodes: PDF_Node[], columnWidth: number) {
         if (
             prev?.type == PDF_NodeType.TEXT &&
             node.type == PDF_NodeType.TEXT &&
+            !prev.footnote && !node.footnote &&
             prev.sourceRect?.page == node.sourceRect?.page &&
+            (!prev.sourceRect || !node.sourceRect ||
+                Math.min(rectRight(prev.sourceRect), rectRight(node.sourceRect)) - Math.max(prev.sourceRect.x, node.sourceRect.x) >
+                    Math.min(prev.sourceRect.width, node.sourceRect.width) * 0.5) &&
             !(
                 !prev.str.trim().endsWith("-") &&
                 prev.str.length < 40 &&
@@ -2911,7 +2935,7 @@ function collectDisplayCandidates(
     }
     let anchors = available.flatMap((entry) => {
         let {line} = entry, edge = equationNumberEdge(line);
-        let fixedCode = fixedLines.has(line) && /^(?:export\s+\w|[A-Za-z_]\w*\s*=|--?[A-Za-z])/.test(line.text);
+        let fixedCode = fixedLines.has(line) && /^(?:export\s+\w|[A-Za-z_]\w*\s*=|--?[A-Za-z]|>\s*\S)/.test(line.text);
         if (!edge && !fixedCode && !isDisplayMathLine(line, columnWidth) && !gridLines.has(line) && !isCodeStatement(line.text)) return [];
         let distance = (column: BodyColumnModel) => Math.min(
             edge != "right" ? Math.abs(line.x - column.x) : Infinity,
@@ -3055,15 +3079,22 @@ function restoreInlineContent(
     let sourceLines = new Map(available.flatMap((line) => line.parts.map((part) => [part, line] as const)));
     let parts = available.flatMap((line) => line.parts);
     let columns = distinctBodyColumns(layout, columnWidth);
+    let columnFor = (part: {page: number; x: number; width: number}) => columns.filter((column) => column.page == part.page &&
+        part.x >= column.x - bodyFontSize * 2 && part.x + part.width <= column.x + columnWidth + bodyFontSize)
+        .sort((a, b) => a.x - b.x)[0];
     let rows: {page: number; x: number; y: number; fontSize: number; parts: TextPart[]; words: Set<TextPart>}[] = [];
+    // アクセントや、1字分の幅に長い綴りが割り当てられた拡張字形を本文の baseline にしない。
+    let accent = (part: TextPart) => /^[˜~^¯ˉˆˇ˘˙¨]+$/.test(part.text);
+    let denseGlyph = (part: TextPart) => part.text.replace(/\s/g, "").length >= 4 &&
+        part.width < part.fontSize * part.text.replace(/\s/g, "").length * 0.15;
+    let mathGlyph = (part: TextPart) => accent(part) || denseGlyph(part);
     for (let part of parts) {
-        let smallProse = part.fontSize < bodyFontSize * 0.85 && (part.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 2;
-        if (part.unmapped || !/(?:[A-Za-z]{2,}|^[.,;:!?]$)/.test(part.text) ||
+        let source = sourceLines.get(part)!;
+        let smallProse = part.fontSize < bodyFontSize * 0.85 && (source.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 2;
+        if (part.unmapped || mathGlyph(part) || !/(?:[A-Za-z]{2,}|^[.,;:!?]$)/.test(part.text) ||
             !smallProse && Math.abs(part.fontSize - bodyFontSize) > bodyFontSize * 0.15) continue;
-        let fontSize = smallProse ? part.fontSize : bodyFontSize;
-        let column = columns.filter((column) => column.page == part.page &&
-            part.x >= column.x - bodyFontSize * 2 && part.x + part.width <= column.x + columnWidth + bodyFontSize)
-            .sort((a, b) => a.x - b.x)[0];
+        let fontSize = lineDominantFontSize(source);
+        let column = columnFor(part);
         if (!column) continue;
         let row = rows.find((row) => row.page == part.page && Math.abs(row.y - part.y) < fontSize * 0.2 &&
             Math.abs(row.fontSize - fontSize) < fontSize * 0.15 && Math.abs(row.x - column.x) < bodyFontSize);
@@ -3072,17 +3103,62 @@ function restoreInlineContent(
     }
     let owners = new Map<TextPart, typeof rows[number]>();
     for (let part of parts) {
+        let source = sourceLines.get(part)!;
+        let extension = source.parts.some(denseGlyph) && source.parts.every((other) => other.unmapped || denseGlyph(other));
         let distance = (row: typeof rows[number]) => Math.abs(row.y - (part.inkRect
             ? part.inkRect.y + part.inkRect.height / 2 - row.fontSize * 0.3 : part.y));
         let row = rows.filter((row) => row.page == part.page && part.x >= row.x - bodyFontSize * 2 &&
-            part.x + part.width <= row.x + columnWidth + bodyFontSize && distance(row) < row.fontSize * 1.1)
+            part.x + part.width <= row.x + columnWidth + bodyFontSize && distance(row) < row.fontSize *
+                (part.unmapped || mathGlyph(part) || part.fontSize < row.fontSize * 0.9 ? 1.1 : 0.35) &&
+            // 拡張字形を、上の行で横位置が重なる通常の単語へ取り付けない。
+            (!extension ||
+                ![...row.words].some((word) => word.x < part.x + part.width && word.x + word.width > part.x)))
             .sort((a, b) => distance(a) - distance(b))[0];
-        if (row) { row.parts.push(part); owners.set(part, row); }
+        if (row) {
+            // 拡張字形だけの行は上端が baseline として渡ることがある。所属行までを画像に残す。
+            if (extension && part.y > row.y + row.fontSize * 0.35) {
+                part.inkRect = {page: part.page, x: part.x, y: row.y - row.fontSize * 0.2,
+                    width: part.width, height: part.y - row.y + row.fontSize * 0.3};
+            }
+            row.parts.push(part); owners.set(part, row);
+        }
     }
     let replacements = new Map<typeof rows[number], TextLine>();
+    // 位置のずれた記号を数式化する前に、行頭の箇条書きを復元する。
+    // ピリオド・ハイフン・Unicode のない小さな字形は、離れた本文と同じ字下げの反復を必要とする。
+    let bullets = rows.flatMap((row) => {
+        row.parts.sort((a, b) => a.x - b.x || b.y - a.y);
+        let [first, next] = row.parts;
+        if (!first) return [];
+        let known = BULLET_ITEM_PATTERN.test(partsToText(row.parts));
+        let ink = first.inkRect;
+        let compactGlyph = first.unmapped && ink && ink.height < row.fontSize * 0.65 &&
+            ink.width > ink.height * 0.8 && ink.width < ink.height * 1.2;
+        if (!known && !(next && (first.text.trim() == "." || /^[-–—]$/.test(first.text.trim()) || compactGlyph) &&
+            next.x - first.x - first.width > row.fontSize * 0.4 &&
+            !isMathFragment(partsToText(row.parts.slice(1))))) return [];
+        return [{row, first, known, indent: (first.x - row.x) / row.fontSize}];
+    });
+    let listIndents = new Map<typeof rows[number], number>();
+    let confirmed = bullets.filter((bullet) => bullet.known || bullets.some((other) => other !== bullet &&
+        other.first.text == bullet.first.text && other.first.fontName == bullet.first.fontName &&
+        Math.abs(other.indent - bullet.indent) < 0.4 &&
+        Math.abs(other.first.width - bullet.first.width) < bullet.row.fontSize * 0.2));
+    for (let {row, first, known, indent} of confirmed) {
+        // 同じ文字片に本文も含まれる既知の記号は、そのまま保持する。
+        if (!known) first.text = "•";
+        first.unmapped = false;
+        first.y = row.y;
+        first.fontSize = row.fontSize;
+        row.words.add(first);
+        listIndents.set(row, indent);
+    }
     for (let row of rows) {
         let bodyFontSize = row.fontSize;
         let ordered = row.parts.sort((a, b) => a.x - b.x || b.y - a.y), result: TextPart[] = [];
+        for (let part of row.parts) if (mathGlyph(part)) {
+            for (let word of row.words) if (word.x < part.x + part.width && word.x + word.width > part.x) row.words.delete(word);
+        }
         for (let i = 0; i < ordered.length;) {
             let first = ordered[i];
             if (row.words.has(first)) { result.push(first); i++; continue; }
@@ -3091,7 +3167,7 @@ function restoreInlineContent(
             while (j < ordered.length && !row.words.has(ordered[j]) && ordered[j].x - right < bodyFontSize * 1.5) {
                 run.push(ordered[j]); right = Math.max(right, ordered[j].x + ordered[j].width); j++;
             }
-            if (run.some((part) => part.unmapped || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(part.text) ||
+            if (run.some((part) => part.unmapped || mathGlyph(part) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(part.text) ||
                 Math.abs(part.y - row.y) > bodyFontSize * 0.12 && (part.fontSize < bodyFontSize * 0.9 || /[∫∑√]/.test(part.text)))) {
                 let ink = unionRects(run.flatMap((part) => part.inkRect ? [part.inkRect] : []));
                 let rect = unionRects(run.map((part) => part.inkRect ??
@@ -3125,10 +3201,19 @@ function restoreInlineContent(
             new Set(ordered.map((part) => sourceLines.get(part))).size > 1 &&
             ordered.every((part, i) => i == 0 || part.x - ordered[i - 1].x - ordered[i - 1].width < bodyFontSize ||
                 part.fontName == ordered[i - 1].fontName && Math.abs(part.y - ordered[i - 1].y) < LINE_Y_EPSILON);
-        if (line && (fragmentedProse || result.some((part) => part.inlineImage))) replacements.set(row, {...line, y: row.y, fontSize: bodyFontSize});
+        if (line && (listIndents.has(row) || fragmentedProse || result.some((part) => part.inlineImage))) {
+            replacements.set(row, {...line, y: row.y, fontSize: bodyFontSize,
+                ...(listIndents.has(row) ? {listIndent: listIndents.get(row)} : {})});
+        }
     }
     let emitted = new Set<typeof rows[number]>();
     return lines.flatMap((line) => {
+        // 数式だけの短い項目など、本文行の復元対象に入らない箇条書きにも字下げを付ける。
+        if (available.includes(line) && BULLET_ITEM_PATTERN.test(line.text) &&
+            Math.abs(lineDominantFontSize(line) - bodyFontSize) < bodyFontSize * 0.15) {
+            let column = columnFor(line);
+            line.listIndent = column ? (line.x - column.x) / bodyFontSize : 0;
+        }
         if (!available.includes(line)) return [line];
         if (!line.parts.some((part) => part.unmapped || replacements.has(owners.get(part)!))) return [line];
         let result: TextLine[] = [], remaining: TextPart[] = [];
@@ -3187,7 +3272,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     lines = splitCaptionLines(splitHeadingLines(lines.filter((line) => !decorations.has(line)), bodyFontSize))
         .filter((line) => line.text != "")
         .filter((line) => !isPageDecoration(line, pageMetrics.get(line.page)));
-    lines = normalizeDropCaps(lines, bodyFontSize);
+    lines = splitMergedColumnLines(normalizeDropCaps(lines, bodyFontSize));
     lines = splitMixedAuthorAffiliationLines(lines);
     let metadata = collectDocumentMetadata(lines, bodyFontSize, pageMetrics.get(1));
 
@@ -3281,7 +3366,12 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
     // 連結中の本文段落を確定する。
     function flushParagraph() {
         if (paragraph != "") {
-            nodes.push(new PDF_Node(paragraph, PDF_NodeType.TEXT, undefined, sourceRectFromLines(paragraphLines)));
+            let node = new PDF_Node(paragraph, PDF_NodeType.TEXT, undefined, sourceRectFromLines(paragraphLines));
+            let first = paragraphLines[0];
+            if (!inReferencesSection && lineDominantFontSize(first) < bodyFontSize * 0.9 &&
+                first.y < pageMetrics.get(first.page)!.height * 0.22) node.footnote = true;
+            if (paragraphLines[0].listIndent != null) node.listIndent = paragraphLines[0].listIndent;
+            nodes.push(node);
             paragraph = "";
             paragraphLines = [];
         }
@@ -3311,9 +3401,13 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             continue;
         }
 
-        // 段幅に収まる小さな脚注本文と行内数式は残し、装飾文字や段外の小さな出版情報を除く。
-        let smallProse = line.width <= columnWidth * 1.1 && (line.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 3 ||
-            line.parts.some((part) => part.inlineImage);
+        // 小さい脚注と段をまたぐ要旨は残し、極端に小さい段外の出版情報は除く。
+        let prev = paragraphLines[paragraphLines.length - 1];
+        let smallProse = (line.width <= columnWidth * 1.1 || line.fontSize >= bodyFontSize * 0.75) &&
+            (line.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 3 ||
+            line.parts.some((part) => part.inlineImage) ||
+            prev && line.page == prev.page && Math.abs(line.fontSize - prev.fontSize) < 0.5 &&
+                prev.y > line.y && prev.y - line.y < line.fontSize * 1.8 && Math.abs(line.x - prev.x) < line.fontSize * 2;
         if (!inReferencesSection && (isPullQuoteLine(line, bodyFontSize) ||
             line.fontSize < bodyFontSize - 1.2 && !smallProse && !isHeadingLine(line, bodyFontSize, relaxedHeading) &&
             !isDisplayMathLine(line, columnWidth))) {
@@ -3326,18 +3420,20 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             titleLines.push(line);
             inReferencesSection = false;
         }
-        else if (isHeadingLine(line, bodyFontSize, relaxedHeading)) {
+        else if (isHeadingLine(line, bodyFontSize, relaxedHeading) &&
+            !(inReferencesSection && isLetteredSectionHeading(line.text))) {
             flushTitle();
             flushParagraph();
             let headingLines = [line];
             let heading = line.text;
-            let nextLine = readingLines[i + 1];
-            if (
-                relaxedHeading &&
-                nextLine &&
+            let nextLine: TextLine | undefined;
+            while (
+                (nextLine = readingLines[i + 1]) &&
                 !figureByStart.has(nextLine) &&
                 !captionLines.has(nextLine) &&
-                isSameLineHeadingContinuation(line, nextLine, bodyFontSize)
+                !displayLines.has(nextLine) &&
+                (relaxedHeading && isSameLineHeadingContinuation(line, nextLine, bodyFontSize) ||
+                    isWrappedHeadingContinuation(headingLines[headingLines.length - 1], nextLine, bodyFontSize))
             ) {
                 heading = appendLineText(heading, nextLine.text);
                 headingLines.push(nextLine);
@@ -3358,7 +3454,7 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
 
     flushTitle();
     flushParagraph();
-    let result = mergeAdjacentTextFragments(moveInterruptedFiguresAfterParagraphs(nodes), columnWidth);
+    let result = mergeAdjacentTextFragments(moveInterruptionsAfterParagraphs(nodes), columnWidth);
     let images = [...readingLines.flatMap((line) => line.parts.flatMap((part) => part.inlineImage ? [part.inlineImage] : [])),
         ...figures.flatMap((figure) => figure.node.inlineImages ?? [])];
     for (let node of result) {
@@ -3442,6 +3538,7 @@ function headingAnchor(node: PDF_Node) {
 }
 
 function referenceAnchor(node: PDF_Node) {
+    if (node.footnote) return null;
     let match = node.str.trim().match(/^(?:\[(\d+)\]|(\d+)\.)\s+/);
     if (!match) {
         return null;
@@ -3565,6 +3662,31 @@ export function bulletListItemText(node: PDF_Node) {
     return match?.[1] ?? null;
 }
 
+export interface PDF_ListItem {
+    index: number;
+    children: PDF_ListItem[];
+}
+
+// 連続する項目を字下げでまとめる。本文レイアウトで確認できた単独の項目も保持する。
+export function bulletListAt(nodes: PDF_Node[], start: number) {
+    if (bulletListItemText(nodes[start]) == null) return null;
+    let items: PDF_ListItem[] = [];
+    let levels = [{indent: nodes[start].listIndent ?? 0, items}];
+    let end = start;
+    for (; end < nodes.length && bulletListItemText(nodes[end]) != null; end++) {
+        let indent = nodes[end].listIndent ?? levels[levels.length - 1].indent;
+        while (levels.length > 1 && indent < levels[levels.length - 1].indent - 0.6) levels.pop();
+        let level = levels[levels.length - 1];
+        if (indent > level.indent + 0.6 && level.items.length) {
+            level = {indent, items: level.items[level.items.length - 1].children};
+            levels.push(level);
+        }
+        level.items.push({index: end, children: []});
+    }
+    if (end == start + 1 && nodes[start].listIndent == null) return null;
+    return {items, end};
+}
+
 // 構造ノード種別を HTML タグに対応づける。
 export function nodeToHTMLElementName(node: PDF_Node) {
     switch (node.type) {
@@ -3610,20 +3732,18 @@ export function nodesToHTML(nodes: PDF_Node[], structureNodes: PDF_Node[] = node
         }
     }
     let body: string[] = [];
+    let listHTML = (items: PDF_ListItem[]): string => `<ul>\n${items.map(({index, children}) => {
+        let item = nodes[index];
+        let text = bulletListItemText(item) ?? item.str;
+        return `<li>${linkedNodeHTML({...item, str: text}, linkContext)}${children.length ? listHTML(children) : ""}</li>`;
+    }).join("\n")}\n</ul>`;
 
     for (let index = 0; index < nodes.length; index++) {
         let node = nodes[index];
-        let listEnd = index;
-        while (listEnd < nodes.length && bulletListItemText(structureNodes[listEnd]) != null) {
-            listEnd++;
-        }
-        if (listEnd - index >= 2) {
-            let items = nodes.slice(index, listEnd).map((item) => {
-                let text = bulletListItemText(item) ?? item.str;
-                return `<li>${linkedNodeHTML({...item, str: text}, linkContext)}</li>`;
-            }).join("\n");
-            body.push(`<ul>\n${items}\n</ul>`);
-            index = listEnd - 1;
+        let list = bulletListAt(structureNodes, index);
+        if (list) {
+            body.push(listHTML(list.items));
+            index = list.end - 1;
             continue;
         }
 

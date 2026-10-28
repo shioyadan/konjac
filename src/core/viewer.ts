@@ -6,7 +6,9 @@ import {
     PDF_NodeType,
     PDF_PageInput,
     PDF_Rect,
+    PDF_ListItem,
     buildHTMLLinkContext,
+    bulletListAt,
     bulletListItemText,
     extractNodesFromPages,
     extractPageInputFromPDFPage,
@@ -234,25 +236,30 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
     main.replaceChildren();
     translationElements.clear();
     let linkContext = buildHTMLLinkContext(nodes);
+    function createList(items: PDF_ListItem[]) {
+        let list = document.createElement("ul");
+        for (let {index, children} of items) {
+            let item = nodes[index];
+            let li = document.createElement("li");
+            // 翻訳と原文表示の対象を項目本文に限定し、子リストを巻き込まない。
+            let content = document.createElement("div");
+            content.innerHTML = linkedNodeHTML({...item, str: bulletListItemText(item) ?? item.str}, linkContext);
+            rememberPDFSource(content, item, pageProxies);
+            attachPDFSourceToggle(content);
+            translationElements.set(index, content);
+            li.appendChild(content);
+            if (children.length) li.appendChild(createList(children));
+            list.appendChild(li);
+        }
+        return list;
+    }
 
     for (let index = 0; index < nodes.length; index++) {
         let node = nodes[index];
-        let listEnd = index;
-        while (listEnd < nodes.length && bulletListItemText(nodes[listEnd]) != null) {
-            listEnd++;
-        }
-        if (listEnd - index >= 2) {
-            let list = document.createElement("ul");
-            for (let [offset, item] of nodes.slice(index, listEnd).entries()) {
-                let li = document.createElement("li");
-                li.innerHTML = linkedNodeHTML({...item, str: bulletListItemText(item) ?? item.str}, linkContext);
-                rememberPDFSource(li, item, pageProxies);
-                attachPDFSourceToggle(li);
-                translationElements.set(index + offset, li);
-                list.appendChild(li);
-            }
-            main.appendChild(list);
-            index = listEnd - 1;
+        let list = bulletListAt(nodes, index);
+        if (list) {
+            main.appendChild(createList(list.items));
+            index = list.end - 1;
             continue;
         }
 

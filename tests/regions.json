@@ -1,6 +1,8 @@
 {
   "test2": {
     "figures": 22, "equations": 0,
+    "lists": [{"page": 2, "items": ["We proposed", "We identified", "We presented", "We implemented a cycle-accurate",
+      {"text": "We evaluated", "includes": "comparable to RISC. This energy reduction"}, "We implemented soft processors"]}],
     "prose": ["out-of-order window size (e.g., 256) [3, 4, 5, 6]."],
     "paragraphStarts": ["Register renaming is necessary", "The register renaming is generally implemented", "These mechanisms rapidly increase"],
     "regions": [
@@ -44,11 +46,14 @@
       {"equation": "10", "page": 5, "content": [116, 80, 169, 10]},
       {"equation": "11", "page": 5, "content": [344, 628, 199, 23]},
       {"equation": "12", "page": 5, "content": [321, 533, 220, 44]},
-      {"equation": "13", "page": 5, "content": [313, 402, 230, 52]}
+      {"equation": "13", "page": 5, "content": [313, 402, 230, 52]},
+      {"inline": true, "page": 4, "content": [145, 213, 19, 11], "exclude": [[140, 216], [169, 216]]},
+      {"inline": true, "page": 4, "content": [126, 187, 18, 11], "exclude": [[120, 190], [150, 190]]}
     ]
   },
   "test5": {
     "figures": 21, "equations": 0,
+    "lists": [{"page": 13, "items": ["A host x86", "An FPGA board with DIMM", "An FPGA board with HBM2", "A rubber heater", "A temperature controller"]}],
     "paragraphStarts": ["We conducted experiments using Intel Core i5-7500"],
     "regions": [
       {"caption": "Table II ", "page": 5, "content": [318, 610, 227, 83], "exclude": [[440, 570]]},
@@ -57,6 +62,10 @@
     ]
   },
   "test6": {
+    "title": "A 32kB 2R/1W L1 Data Cache in 45nm SOI Technology for the POWER7 Processor",
+    "author": "Juergen Pille, Dieter Wendel, Otto Wagner, Rolf Sautter, Wolfgang Penth, Thomas Froehnel, Stefan Buettner, Otto Torreiter, Martin Eckert, Jose Paredes, David Hrusecky, David Ray, Miles Canada",
+    "referenceCount": 5,
+    "absent": ["• 2010 IEEE"],
     "figures": 7, "equations": 0,
     "regions": [
       {"caption": "Figure 19.2.1:", "page": 2, "content": [37, 560, 245, 128], "exclude": [[450, 610]]},
@@ -69,7 +78,15 @@
     ]
   },
   "test7": {
+    "headings": ["Number of Instructions to Reconvergence"],
     "figures": 10, "equations": 0,
+    "lists": [
+      {"page": 2, "items": ["We propose a novel", "We propose a method", "We present"]},
+      {"page": 3, "items": ["Our simulation results"]},
+      {"page": 5, "items": ["Add dedicated registers", "Add a pseudo-random"]},
+      {"page": 6, "items": ["Extend a context table"]},
+      {"page": 7, "items": ["As approx_prob increases", "Decreasing approx_thld", "BH, implementing"]}
+    ],
     "regions": [
       {"caption": "FIGURE 1.", "page": 3, "content": [77, 514, 429, 165], "exclude": [[85, 732]]},
       {"caption": "FIGURE 3.", "page": 5, "content": [305, 80, 204, 121], "exclude": [[400, 234]]},
@@ -79,6 +96,8 @@
     ]
   },
   "test8": {
+    "referenceCount": 29,
+    "paragraphStarts": ["[22] J. A. Davis, R. Venkatesan, A. Kaloyeros, M. Beylansky, S. J. Souri, K. Banerjee, K. C. Saraswat"],
     "figures": 10, "equations": 0,
     "prose": ["exponent difference, and in some designs, a zero detect on the output of the top 52-bit incrementer."],
     "headings": ["V. RESULTS", "VI. CONCLUSION", "ACKNOWLEDGEMENTS", "REFERENCES"],
@@ -90,8 +109,13 @@
     ]
   },
   "test9": {
+    "headings": ["II. TRADITIONAL FLOATING-POINT MULTIPLY-ADDS", "III. ENHANCED FLOATING-POINT MULTIPLY-ADD", "E. Normalization, Sticky, and All-ones Detection"],
     "figures": 11, "equations": 15,
-    "paragraphStarts": ["\uf0b7 1x = fB", "\uf0b7 2x = fB", "\uf0b7 5 – 6 partial products", "\uf0b7 sM = 1 and not inverted", "E. Normalization, Sticky, and All-ones Detection"],
+    "lists": [
+      {"page": 4, "items": ["1x =", "2x =", "3x =", "4x =", "5x =", "6x =", "7x =", "8x ="]},
+      {"page": 4, "items": ["3 – 4 partial", "5 – 6 partial", "7 – 9 partial", "10 – 13 partial", "14 – 16 partial"]}
+    ],
+    "paragraphStarts": ["\uf0b7 1x = fB", "\uf0b7 2x = fB", "\uf0b7 5 – 6 partial products", "\uf0b7 sM = 1 and not inverted"],
     "regions": [
       {"caption": "TABLE IV ", "page": 8, "content": [50, 456, 510, 253], "exclude": [[160, 360], [420, 200]]},
       {"caption": "Fig. 7.", "page": 6, "content": [350, 375, 182, 350]},
@@ -128,6 +152,7 @@
     ]
   },
   "test11": {
+    "referenceCount": 43,
     "figures": 16, "equations": 0,
     "prose": ["For vector memory fences it is necessary to mark the reorder buffer", "Vector memory requests had to be handled differently", "load/store queue (LSQ) must be used."],
     "regions": [
@@ -150,6 +175,8 @@
     ]
   },
   "test12": {
+    "referenceCount": 26,
+    "headings": ["II. REVIEW OF INSTRUCTION SCHEDULING IN OUT-OF-ORDER PROCESSORS"],
     "figures": 11, "equations": 0,
     "regions": [
       {"caption": "Table I ", "page": 1, "content": [317, 105, 236, 64], "exclude": [[440, 97], [440, 190]]},
@@ -166,7 +193,9 @@
     ]
   },
   "test13": {
+    "headings": ["6.3 CAT on TAGE?"],
     "figures": 16, "equations": 10, "blocks": 3, "readableMath": true,
+    "lists": [{"page": 6, "items": ["TAGE considers", "A tiny meta-predictor", "Each tagged entry", "The pred entry", "The u counters", "TAGE allocates"]}],
     "regions": [
       {"caption": "Fig. 1.", "page": 3, "content": [94, 98, 292, 538], "exclude": [[100, 660], [200, 83]]},
       {"caption": "Fig. 2.", "page": 5, "content": [124, 472, 236, 164], "exclude": [[100, 660], [200, 455]]},
@@ -203,7 +232,15 @@
     ]
   },
   "test14": {
+    "author": "Pierre Michaud, Andr´e Seznec, Richard Uhlig",
     "figures": 14, "equations": 9, "readableMath": true,
+    "lists": [
+      {"page": 2, "items": ["Compulsory misses", "Capacity misses", "Conflict misses"]},
+      {"page": 2, "items": ["Compulsory aliasing", "Capacity aliasing", "Conflict aliasing"]},
+      {"page": 3, "items": ["A total update policy", {"text": "A partial update policy", "includes": "This wrong predictor is considered"}]},
+      {"page": 10, "items": ["Update Policies:"]},
+      {"page": 11, "items": ["Distributed Predictor Encodings:", "Minimizing Capacity Aliasing:"]}
+    ],
     "regions": [
       {"caption": "Table 1:", "page": 2, "content": [363, 644, 164, 89], "exclude": [[450, 630]]},
       {"caption": "Table 2:", "page": 3, "content": [62, 504, 239, 217], "exclude": [[180, 488], [330, 660]]},
@@ -239,6 +276,7 @@
     ]
   },
   "test15": {
+    "paragraphStarts": ["The remaining functions should also have high accuracy."],
     "figures": 7, "equations": 11, "readableMath": true,
     "prose": ["by evaluating the expression", "2. Given", "which can be rewritten as"],
     "regions": [
@@ -263,10 +301,21 @@
     ]
   },
   "test16": {
-    "figures": 13, "equations": 16, "blocks": 1, "readableMath": true,
-    "paragraphStarts": ["- A specialized squaring unit", "- SD radix-4 recoding", "- The accumulation of all partial products", "- Assimilation into nonredundant representation"],
+    "author": "Jean-Michel Muller, Stuart Oberman, Jose-Alejandro Pineiro, Javier Bruguera",
+    "absent": ["ffiffiffi"],
+    "paragraphStarts": ["—A table-based method for high-speed function approximation", "Index Terms—Table-based methods, reciprocal, square root"],
+    "figures": 13, "equations": 16, "blocks": 3, "readableMath": true,
+    "lists": [
+      {"page": 3, "items": ["Compute-bound methods", "Table-bound methods", "In-between methods"]},
+      {"page": 5, "items": [
+        {"text": "An enhanced minimax", "children": ["The value of m", "The wordlengths", "The range of the coefficients"]},
+        {"text": "A high-speed evaluation", "children": ["A specialized squaring unit", "SD radix-4 recoding", "The accumulation of all partial products",
+          {"text": "Assimilation into nonredundant representation", "includes": "If two multiplications and two additions were performed, several sequential assimilations"}]},
+        "Rounding is performed"
+      ]}
+    ],
     "headingOrder": ["3 MINIMAX QUADRATIC INTERPOLATOR", "3.1 Range Reduction and Notation", "3.2 Overview of the Method"],
-    "prose": ["If two multiplications and two additions were performed, several sequential assimilations would be necessary, slowing down the polynomial computation significantly.", "Table 1. It happens that", "Table 7. To allow for a fair comparison", "Such acceleration can be achieved [29], [31], [36] by combining the use of redundant arithmetic, a specialized squaring unit, and the accumulation of all partial products in a multioperand adder."],
+    "prose": ["Let us illustrate this with an example: Consider the computation", ", is equivalent to performing an order-1 approximation to", "addressed by Muller [25] by showing that the degree-1", "computer 3D graphics, animation, digital signal processing (DSP), computer-assisted design (CAD)", "higherprecision computations have become mandatory.", "For instance, it will be shown in Section 3.4", "producing the exactly rounded result.", "try different degrees.", "If two multiplications and two additions were performed, several sequential assimilations would be necessary, slowing down the polynomial computation significantly.", "Table 1. It happens that", "Table 7. To allow for a fair comparison", "Such acceleration can be achieved [29], [31], [36] by combining the use of redundant arithmetic, a specialized squaring unit, and the accumulation of all partial products in a multioperand adder."],
     "regions": [
       {"caption": "Fig. 1.", "page": 4, "content": [293, 464, 243, 255], "exclude": [[420, 449], [200, 600]]},
       {"caption": "Fig. 2.", "page": 5, "content": [45, 497, 214, 224], "exclude": [[150, 477]]},
@@ -297,7 +346,10 @@
       {"equation": "14", "page": 11, "content": [365, 443, 175, 13], "exclude": [[420, 434]]},
       {"equation": "15", "page": 12, "content": [40, 34, 237, 41], "exclude": [[150, 83]]},
       {"equation": "16", "page": 12, "content": [299, 313, 241, 40], "exclude": [[420, 302], [180, 350]]},
-      {"blockIndex": 1, "page": 8, "content": [27, 332, 161, 22], "exclude": [[150, 367], [150, 320]]}
+      {"blockIndex": 1, "page": 8, "content": [27, 332, 161, 22], "exclude": [[150, 367], [150, 320]]},
+      {"blockIndex": 2, "page": 8, "content": [27, 263, 205, 21], "exclude": [[150, 297], [150, 248]]},
+      {"blockIndex": 3, "page": 8, "content": [27, 29, 193, 22], "exclude": [[150, 63]]},
+      {"inline": true, "page": 8, "content": [416, 270, 14, 8], "exclude": [[430, 284], [410, 273]]}
     ]
   }
 }

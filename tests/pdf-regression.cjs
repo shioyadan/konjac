@@ -3,12 +3,32 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const specs = require('./regions.json');
+const ts = require('typescript');
+const engine = {};
+new Function('exports', ts.transpileModule(fs.readFileSync('src/core/extractor.ts', 'utf8'), {
+    compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}
+}).outputText)(engine);
 const input = path.resolve(process.argv[2] || 'work');
 let checked = 0;
+let checkedLists = 0;
 for (const name of Object.keys(specs)) {
     const file = name + '.json';
     const nodes = JSON.parse(fs.readFileSync(path.join(input, file), 'utf8'));
     const spec = specs[name];
+    for (const [field, type] of [['title', 2], ['author', 7]]) {
+        if (spec[field]) assert.deepEqual(nodes.filter((n) => n.type === type).map((n) => n.str), [spec[field]],
+            `${file}: ${field}`);
+    }
+    if (spec.referenceCount) {
+        const start = nodes.findIndex((n) => n.type === 3 && /^References:?$/i.test(n.str));
+        assert.ok(start >= 0, `${file}: references heading`);
+        const entries = nodes.slice(start + 1).filter((n) => n.type === 1 && !n.footnote && /^\[\d+\]\s/.test(n.str));
+        const expected = Array.from({length: spec.referenceCount}, (_, i) => String(i + 1));
+        assert.deepEqual(entries.map((n) => n.str.match(/^\[(\d+)\]/)[1]), expected, `${file}: reference entries`);
+        const context = engine.buildHTMLLinkContext(nodes);
+        entries.forEach((entry, i) => assert.equal(context.references.get(expected[i]), context.ids.get(entry),
+            `${file}: reference ${expected[i]} must link to its bibliography entry`));
+    }
     assert.equal(nodes.filter((n) => n.type === 5).length, spec.figures, `${file}: figure count`);
     assert.equal(nodes.filter((n) => n.type === 6).length, spec.equations, `${file}: equation count`);
     assert.equal(nodes.filter((n) => n.type === 9).length, spec.blocks || 0, `${file}: uncaptioned block count`);
@@ -34,6 +54,25 @@ for (const name of Object.keys(specs)) {
         `${file}: fragmented or reordered prose: ${text}`);
     for (const text of spec.paragraphStarts || []) assert.ok(nodes.some((node) => node.type === 1 && node.str.startsWith(text)),
         `${file}: paragraph merged into preceding content: ${text}`);
+    for (const text of spec.absent || []) assert.ok(nodes.every((node) => !node.str.includes(text)),
+        `${file}: unexpected text: ${text}`);
+    for (const expected of spec.lists || []) {
+        const startText = typeof expected.items[0] === 'string' ? expected.items[0] : expected.items[0].text;
+        const start = nodes.findIndex(node => node.sourceRect?.page === expected.page &&
+            engine.bulletListItemText(node)?.startsWith(startText));
+        assert.ok(start >= 0, `${file}: missing list on page ${expected.page}: ${startText}`);
+        const checkItems = (items, expectedItems) => {
+            assert.equal(items.length, expectedItems.length, `${file}: list length: ${startText}`);
+            items.forEach((item, i) => {
+                const spec = typeof expectedItems[i] === 'string' ? {text: expectedItems[i]} : expectedItems[i];
+                assert.ok(engine.bulletListItemText(nodes[item.index]).startsWith(spec.text), `${file}: list item: ${spec.text}`);
+                if (spec.includes) assert.ok(nodes[item.index].str.includes(spec.includes), `${file}: split item: ${spec.text}`);
+                checkItems(item.children, spec.children || []);
+            });
+        };
+        checkItems(engine.bulletListAt(nodes, start).items, expected.items);
+        checkedLists++;
+    }
     if (spec.readableMath) assert.ok(nodes.filter((node) => node.type !== 6).every((node) =>
         !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f�]/.test(node.str)), `${file}: unreadable math in prose or captions`);
     for (const node of nodes) {
@@ -68,4 +107,4 @@ for (const name of Object.keys(specs)) {
     }
     console.log(`${file}: ${spec.regions.length} regions passed`);
 }
-console.log(`${checked} annotated regions passed`);
+console.log(`${checked} annotated regions and ${checkedLists} lists passed`);

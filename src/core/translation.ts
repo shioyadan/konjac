@@ -182,6 +182,8 @@ export function translatedNodesFromEntries(
     let translatedNodes = nodes.map((node) => {
         let translated = new PDF_Node(node.str, node.type, node.rect, node.sourceRect);
         translated.imageSrc = node.imageSrc;
+        if (node.listIndent != null) translated.listIndent = node.listIndent;
+        if (node.footnote) translated.footnote = true;
         if (node.inlineImages) translated.inlineImages = node.inlineImages;
         return translated;
     });

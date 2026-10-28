@@ -826,6 +826,113 @@ test('skipping figure labels does not merge a footnote into the next column', ()
     assert.ok(!note.str.includes('Ordinary prose'));
 });
 
+test('a smaller full-width abstract keeps every line including a short final word', () => {
+    const nodes = extract([...paragraph(40, 480), ...paragraph(320, 480),
+        text('Abstract', 40, 710, 55, 8),
+        text('This abstract explains the new method and its important properties for the entire system.', 40, 690, 520, 8),
+        text('The proposed architecture improves both execution speed and resource use for practical', 40, 680, 520, 8),
+        text('applications.', 40, 670, 45, 8)]);
+    const abstract = nodes.find((n) => n.str.startsWith('This abstract'));
+    assert.ok(abstract?.str.endsWith('resource use for practical applications.'));
+    assert.ok(abstract.str.includes('entire system. The proposed'));
+});
+
+test('a footnote stays separate while the interrupted body continues in the next column', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(320, 650),
+        text('The computation returns the final', 40, 160, 240),
+        text('1. This note describes the rounded', 40, 90, 200, 8),
+        text('result.', 40, 80, 23, 8),
+        text('result using the proposed architecture.', 320, 750, 240),
+        text('Each operation preserves the required precision.', 320, 736, 240)]);
+    assert.ok(nodes.some((n) => n.str === 'The computation returns the final result using the proposed architecture. Each operation preserves the required precision.'));
+    const note = nodes.find((n) => n.footnote);
+    assert.equal(note?.str, '1. This note describes the rounded result.');
+    assert.equal(engine.exports.buildHTMLLinkContext(nodes).ids.has(note), false);
+});
+
+test('small bibliography text keeps page numbers and the next reference on their own baselines', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('References:', 40, 650, 85),
+        text('[1] A. Researcher, A study of the proposed architecture,', 40, 630, 238, 8),
+        text('Proceedings of the conference, pp.', 40, 621, 180, 8), text('3–14.', 225, 621, 25, 8),
+        text('[2]', 40, 612, 12, 8), text('B. Author, Another investigation.', 57, 612, 215, 8),
+        text('[3] C. Researcher,', 40, 600, 100, 8),
+        text('K. Writer,', 40, 591, 60, 8),
+        text('A survey of published work.', 40, 582, 180, 8)]);
+    const refs = nodes.filter((n) => n.type === 1 && /^\[\d+\]/.test(n.str));
+    assert.equal(refs.length, 3);
+    assert.ok(refs[0].str.endsWith('pp. 3–14.'));
+    assert.equal(refs[1].str, '[2] B. Author, Another investigation.');
+    assert.equal(refs[2].str, '[3] C. Researcher, K. Writer, A survey of published work.');
+    assert.ok(refs.every((n) => !n.inlineImages?.length));
+});
+
+test('a numbered list does not absorb the paragraph after its final item', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('4. Return the computed value to the caller.', 40, 650, 240),
+        text('The remaining operations use the same mechanism.', 50, 625, 230),
+        text('Their accuracy depends on the selected precision.', 40, 611, 240)]);
+    assert.ok(nodes.some((n) => n.str === '4. Return the computed value to the caller.'));
+    assert.ok(nodes.some((n) => n.str === 'The remaining operations use the same mechanism. Their accuracy depends on the selected precision.'));
+});
+
+test('wrapped headings join while neighboring numbered headings and prose stay separate', () => {
+    const head = (str, x, y, w, size = 10) => ({...text(str, x, y, w, size), fontName: 'heading'});
+    const nodes = extract([...paragraph(40, 750),
+        head('II. REVIEW OF INSTRUCTION SCHEDULING', 40, 650, 240),
+        head('IN MODERN PROCESSORS', 80, 638, 160),
+        ...paragraph(40, 615),
+        head('Number of Instructions to', 40, 550, 180, 12),
+        head('Reconvergence', 40, 536, 100, 12),
+        head('E. Normalization, Rounding, and Detection', 40, 495, 240),
+        head('6.3 What Comes Next?', 40, 460, 140)]);
+    const headings = nodes.filter((n) => n.type === 3).map((n) => n.str);
+    assert.deepEqual(headings, ['II. REVIEW OF INSTRUCTION SCHEDULING IN MODERN PROCESSORS',
+        'Number of Instructions to Reconvergence', 'E. Normalization, Rounding, and Detection', '6.3 What Comes Next?']);
+});
+
+test('a conference banner does not replace the paper title or truncate authors beside body text', () => {
+    const nodes = extractNodesFromPages([{width: 600, height: 800, items: [
+        ...paragraph(40, 530), ...paragraph(320, 740), ...paragraph(320, 690),
+        text('CONFERENCE SESSION / EMBEDDED MEMORY', 40, 775, 510, 14),
+        text('A novel architecture for', 40, 740, 240, 12), text('efficient memory access', 40, 725, 230, 12),
+        text('Alice Smith, Bob Jones', 40, 700, 220, 11),
+        text('André Martin, Claire Taylor', 40, 680, 220, 11),
+        text('University of Somewhere', 40, 660, 220),
+        text('To cite this version:', 40, 630, 100),
+        text('Alice Smith, Bob Jones, André Martin, Claire Taylor', 40, 610, 235)]}]);
+    assert.deepEqual(nodes.filter((n) => n.type === 2).map((n) => n.str), ['A novel architecture for efficient memory access']);
+    assert.deepEqual(nodes.filter((n) => n.type === 7).map((n) => n.str), ['Alice Smith, Bob Jones, André Martin, Claire Taylor']);
+});
+
+test('detached accents and tightly encoded radical glyphs stay inside inline images', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('The estimated value', 40, 650, 90), text('CPI', 135, 650, 15), text('˜', 139, 658, 5),
+        text('describes execution performance.', 155, 650, 125),
+        text('Ordinary prose immediately above the radical.', 40, 624, 240),
+        text('The square root of', 40, 610, 90), text('ffiffiffiffi', 135, 618, 6), text('X', 142, 610, 7),
+        text('determines the final result.', 155, 610, 125)]);
+    const prose = nodes.filter((n) => n.type === 1);
+    assert.ok(prose.every((n) => !/[˜]|ffiffi/.test(n.str)));
+    for (const prefix of ['The estimated value', 'The square root of']) {
+        const node = prose.find((n) => n.str.includes(prefix));
+        assert.equal(node?.inlineImages?.length, 1);
+        assert.ok(node.inlineImages[0].rect.x <= 139 && right(node.inlineImages[0].rect) >= 145);
+    }
+    assert.ok(prose.some((n) => n.str.includes('Ordinary prose immediately above the radical.')));
+});
+
+test('monospace interactive input and output become separate images around prose', () => {
+    const mono = (str, y) => ({...text(str, 40, y, 220), fontName: 'mono', monospace: true});
+    const nodes = extract([...paragraph(40, 750),
+        mono('> approximate(function, interval);', 650),
+        text('This returns a polynomial approximation.', 40, 625, 240),
+        mono('> 0.93 + (-0.41 + 0.27 x) x', 600),
+        ...paragraph(40, 565)]);
+    assert.equal(nodes.filter((n) => n.type === 9).length, 2);
+    assert.ok(nodes.some((n) => n.type === 1 && n.str === 'This returns a polynomial approximation.'));
+});
+
 test('rotated labels inside a figure do not leak into standalone paragraphs', () => {
     const nodes = extract([...paragraph(40, 710), ...paragraph(40, 330),
         text('Figure 1. Diagram.', 40, 390, 230, 9),
@@ -867,4 +974,110 @@ test('wide centered labels and complete statements do not join prose in the next
         text('the remaining measurements are discussed here.', 320, 750, 240)]);
     assert.ok(nodes.some((node) => node.str === 'Measurements across configurations (relative error)'));
     assert.ok(nodes.some((node) => node.str.startsWith('the remaining measurements')));
+});
+
+test('a list item continues with an uppercase word across a column or page', () => {
+    for (const nextPage of [false, true]) {
+        const items = [...paragraph(40, 750), ...paragraph(320, 650),
+            text('• The measured performance is comparable to', nextPage ? 330 : 50, 100, 230)];
+        const continuation = [text('RISC. The improvement is consistent.', nextPage ? 60 : 340, 750, 220),
+            text('• The final item describes the implementation.', nextPage ? 50 : 330, 710, 230)];
+        const pages = [{width: 600, height: 800, items: paragraph(40, 700)},
+            {width: 600, height: 800, items: nextPage ? items : items.concat(continuation)}];
+        if (nextPage) pages.push({width: 600, height: 800, items: [...continuation, ...paragraph(40, 650)]});
+        const nodes = extractNodesFromPages(pages);
+        assert.ok(nodes.some((n) => n.str === '• The measured performance is comparable to RISC. The improvement is consistent.'));
+        assert.ok(nodes.some((n) => n.str === '• The final item describes the implementation.'));
+    }
+});
+
+test('raised bullets and repeated unmapped bullets remain list markers instead of formulas', () => {
+    for (const marker of [y => text('❯', 50, y + 1.5, 4, 6), y => painted(50, y + 1, 4, 4)]) {
+        const nodes = extract([...paragraph(40, 750), text('The contributions are as follows:', 40, 680, 220),
+            marker(666), text('The first method improves the results.', 62, 666, 210),
+            marker(636), text('The second method reduces the cost.', 62, 636, 210), ...paragraph(40, 580)]);
+        const items = nodes.filter(n => engine.exports.bulletListItemText(n) != null);
+        assert.equal(items.length, 2);
+        assert.ok(items.every(n => !n.inlineImages?.length && n.listIndent != null));
+        assert.ok(nodes.some(n => n.str === 'The contributions are as follows:'));
+        assert.equal((engine.exports.nodesToHTML(nodes).match(/<li>/g) || []).length, 2);
+    }
+});
+
+test('detached dots and dashes form nested lists with wrapped children', () => {
+    const item = (symbol, x, y, str) => [text(symbol, x, y, 4), text(str, x + 18, y, 260 - x)];
+    const nodes = extract([...paragraph(40, 750), text('The features are summarized as:', 40, 680, 220),
+        ...item('.', 50, 650, 'The first method has two variants.'),
+        ...item('-', 68, 622, 'The first variant is evaluated'), text('with additional measurements.', 86, 608, 180),
+        ...item('-', 68, 580, 'The second variant has lower cost.'),
+        ...item('.', 50, 552, 'The second method improves throughput.'), ...paragraph(40, 500)]);
+    const start = nodes.findIndex(n => n.str.includes('The first method'));
+    const list = engine.exports.bulletListAt(nodes, start);
+    assert.equal(list.items.length, 2);
+    assert.equal(list.items[0].children.length, 2);
+    assert.equal(nodes[list.items[0].children[0].index].str, '• The first variant is evaluated with additional measurements.');
+    const html = engine.exports.nodesToHTML(nodes);
+    assert.match(html, /<li>The first method has two variants\.<ul>/);
+    assert.match(html, /<\/ul><\/li>\s*<li>The second method/);
+});
+
+test('a leading abstract dash and small inline math are not list markers', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('-', 40, 680, 3), text('Two new algorithms are presented in this study.', 47, 680, 233),
+        text('The experiments confirm these improvements.', 50, 650, 230),
+        painted(40, 620, 4, 4), text('is the probability of choosing the first option.', 46, 620, 234),
+        painted(40, 590, 4, 4), text('is the probability of choosing the second option.', 46, 590, 234)]);
+    assert.ok(nodes.every(n => engine.exports.bulletListItemText(n) == null));
+    assert.ok(nodes.some(n => n.str.startsWith('The experiments')));
+    assert.equal(nodes.flatMap(n => n.inlineImages || []).length, 2);
+});
+
+test('single items and nested translated lists preserve structure', () => {
+    const nodes = [new engine.exports.PDF_Node('• First item', 1), new engine.exports.PDF_Node('• Child item', 1),
+        new engine.exports.PDF_Node('• Second item', 1), new engine.exports.PDF_Node('Following prose.', 1),
+        new engine.exports.PDF_Node('• Isolated item', 1)];
+    [0, 2, 0, 0, 0].forEach((indent, i) => nodes[i].listIndent = indent);
+    const translated = nodes.map((n, i) => ({...n, str: `Translated <${i}>`}));
+    const html = engine.exports.nodesToHTML(translated, nodes);
+    assert.match(html, /<li>Translated &lt;0&gt;<ul>\s*<li>Translated &lt;1&gt;<\/li>\s*<\/ul><\/li>/);
+    assert.match(html, /<li>Translated &lt;2&gt;<\/li>\s*<\/ul>/);
+    assert.match(html, /<p>Translated &lt;3&gt;<\/p>\s*<ul>\s*<li>Translated &lt;4&gt;<\/li>/);
+});
+
+test('short formula items and prose items at the same margin remain siblings', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 550),
+        text('• x = a', 58, 680, 35), text('• y = b', 58, 660, 35),
+        text('• The sum is calculated using an adder.', 58, 640, 220),
+        text('• z = c', 58, 620, 35)]);
+    const start = nodes.findIndex(n => n.str === '• x = a');
+    const list = engine.exports.bulletListAt(nodes, start);
+    assert.equal(list.items.length, 4);
+    assert.ok(list.items.every(item => item.children.length === 0));
+});
+
+test('a list item interrupted by a figure on the next page preserves its continuation', () => {
+    const nodes = extractNodesFromPages([
+        {width: 600, height: 800, items: paragraph(40, 700)},
+        {width: 600, height: 800, items: [...paragraph(40, 750),
+            text('• The first option uses a local predictor.', 50, 150, 220),
+            text('• The second option avoids interference. This', 50, 120, 220)]},
+        {width: 600, height: 800, items: [text('Figure 1. The predictor.', 40, 500, 220, 9),
+            text('policy updates all banks when necessary.', 62, 460, 210), ...paragraph(40, 400)],
+            graphics: [{...shape(50, 550, 210, 150), page: 3}]}
+    ]);
+    const item = nodes.find(n => n.str.startsWith('• The second option'));
+    assert.ok(item.str.endsWith('This policy updates all banks when necessary.'));
+    assert.ok(item.listIndent != null);
+    assert.equal(engine.exports.bulletListAt(nodes, nodes.indexOf(item) - 1).items.length, 2);
+    assert.equal(nodes[nodes.indexOf(item) + 1].type, 5);
+});
+
+test('an isolated bullet in a larger publication footer does not create a list', () => {
+    const nodes = extract([...paragraph(40, 750), ...paragraph(320, 750),
+        text('• A standalone item within the body text.', 50, 650, 225),
+        ...paragraph(40, 580),
+        text('• Annual International Conference', 64, 14, 225, 12)]);
+    const html = engine.exports.nodesToHTML(nodes);
+    assert.match(html, /<li>A standalone item within the body text\.<\/li>/);
+    assert.ok(!html.includes('<li>Annual International Conference'));
 });
