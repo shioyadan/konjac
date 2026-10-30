@@ -17,6 +17,7 @@ import {
     nodeHTMLId,
     nodeToHTMLElementName
 } from "./extractor";
+import {attachNodeImages, renderPageCanvas} from "./render";
 import {
     TranslationDocument,
     createTranslationDocument,
@@ -26,7 +27,6 @@ import {
 
 console.log("initialized.");
 
-const FIGURE_RENDER_SCALE = 4.0;
 const SOURCE_PREVIEW_RENDER_SCALE = 2.0;
 
 interface ChromeTranslator {
@@ -60,12 +60,6 @@ declare global {
     interface Window {
         Translator?: ChromeTranslatorFactory;
     }
-}
-
-interface RenderedPageCanvas {
-    canvas: HTMLCanvasElement;
-    pageHeight: number;
-    scale: number;
 }
 
 interface PDFSourceLocation {
@@ -123,62 +117,11 @@ export function promptForPDFPassword(reason: PDFPasswordReason): Promise<string 
     });
 }
 
-async function renderPageCanvas(page: any, scale = FIGURE_RENDER_SCALE) {
-    let viewport = page.getViewport({scale});
+function createCanvas(width: number, height: number) {
     let canvas = document.createElement("canvas");
-    canvas.width = Math.ceil(viewport.width);
-    canvas.height = Math.ceil(viewport.height);
-
-    let context = canvas.getContext("2d");
-    if (!context) {
-        return null;
-    }
-
-    context.fillStyle = "white";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({canvasContext: context, viewport}).promise;
-
-    return {
-        canvas,
-        pageHeight: page.getViewport({scale: 1}).height,
-        scale
-    };
-}
-
-function cropRectFromPage(renderedPage: RenderedPageCanvas, rect: PDF_Rect) {
-    let scale = renderedPage.scale;
-    let sourceX = Math.max(0, Math.floor(rect.x * scale));
-    let sourceY = Math.max(0, Math.floor((renderedPage.pageHeight - rect.y - rect.height) * scale));
-    let sourceWidth = Math.min(renderedPage.canvas.width - sourceX, Math.ceil(rect.width * scale));
-    let sourceHeight = Math.min(renderedPage.canvas.height - sourceY, Math.ceil(rect.height * scale));
-
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
-        return "";
-    }
-
-    let crop = document.createElement("canvas");
-    crop.width = sourceWidth;
-    crop.height = sourceHeight;
-
-    let cropContext = crop.getContext("2d");
-    if (!cropContext) {
-        return "";
-    }
-
-    cropContext.fillStyle = "white";
-    cropContext.fillRect(0, 0, sourceWidth, sourceHeight);
-    cropContext.drawImage(
-        renderedPage.canvas,
-        sourceX,
-        sourceY,
-        sourceWidth,
-        sourceHeight,
-        0,
-        0,
-        sourceWidth,
-        sourceHeight
-    );
-    return crop.toDataURL("image/png");
+    canvas.width = width;
+    canvas.height = height;
+    return canvas;
 }
 
 function sourcePageImage(page: any) {
@@ -187,7 +130,7 @@ function sourcePageImage(page: any) {
         return cached;
     }
 
-    let rendered = renderPageCanvas(page, SOURCE_PREVIEW_RENDER_SCALE).then((renderedPage) => renderedPage ? {
+    let rendered = renderPageCanvas(page, createCanvas, SOURCE_PREVIEW_RENDER_SCALE).then((renderedPage) => renderedPage ? {
         src: renderedPage.canvas.toDataURL("image/png"),
         width: renderedPage.canvas.width,
         height: renderedPage.canvas.height,
@@ -196,26 +139,6 @@ function sourcePageImage(page: any) {
     } : null);
     pdfSourcePageImages.set(page, rendered);
     return rendered;
-}
-
-// 図表と数式の bbox を同じページ描画から切り出し、表示用 PNG を付与する。
-async function attachNodeImages(nodes: PDF_Node[], pageProxies: any[]) {
-    let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas | null>>();
-
-    for (let node of nodes) {
-        let images = [...(node.rect ? [node] : []),
-            ...(node.inlineImages ?? [])];
-        for (let image of images) {
-            let rect = image.rect!;
-            if (!pageCanvasPromises.has(rect.page)) {
-                let page = pageProxies[rect.page - 1];
-                if (!page) continue;
-                pageCanvasPromises.set(rect.page, renderPageCanvas(page));
-            }
-            let renderedPage = await pageCanvasPromises.get(rect.page);
-            if (renderedPage) image.imageSrc = cropRectFromPage(renderedPage, rect);
-        }
-    }
 }
 
 function rememberPDFSource(element: HTMLElement, node: PDF_Node, pageProxies: any[]) {
@@ -264,12 +187,14 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
         }
 
         let id = nodeHTMLId(node, linkContext);
-        if (node.type == PDF_NodeType.FIGURE) {
+        if (node.type == PDF_NodeType.FIGURE || node.type == PDF_NodeType.EQUATION || node.type == PDF_NodeType.BLOCK_IMAGE) {
+            let captioned = node.type == PDF_NodeType.FIGURE;
             let figure = document.createElement("figure");
-            if (id) {
+            if (captioned && id) {
                 figure.id = id;
             }
-            figure.style.margin = "1.5rem 0";
+            if (!captioned) figure.className = node.type == PDF_NodeType.EQUATION ? "equation" : "block-image";
+            figure.style.margin = captioned ? "1.5rem 0" : "1rem 0";
             if (node.imageSrc) {
                 let image = document.createElement("img");
                 image.src = node.imageSrc;
@@ -278,36 +203,20 @@ function show(nodes: PDF_Node[], pageProxies: any[]) {
                 image.style.width = figureImageDisplayWidth(node.rect);
                 image.style.maxWidth = "100%";
                 image.style.height = "auto";
-                image.style.margin = "0 auto 0.5rem";
+                image.style.margin = captioned ? "0 auto 0.5rem" : "0 auto";
                 figure.appendChild(image);
             }
 
-            let caption = document.createElement("figcaption");
-            caption.innerHTML = linkedNodeHTML(node, linkContext);
-            caption.style.textAlign = "left";
-            rememberPDFSource(caption, node, pageProxies);
-            attachPDFSourceToggle(caption);
-            translationElements.set(index, caption);
-            figure.appendChild(caption);
-            main.appendChild(figure);
-            continue;
-        }
-        if (node.type == PDF_NodeType.EQUATION || node.type == PDF_NodeType.BLOCK_IMAGE) {
-            let figure = document.createElement("figure");
-            figure.className = node.type == PDF_NodeType.EQUATION ? "equation" : "block-image";
-            figure.style.margin = "1rem 0";
-            if (node.imageSrc) {
-                let image = document.createElement("img");
-                image.src = node.imageSrc;
-                image.alt = node.str;
-                image.style.display = "block";
-                image.style.width = figureImageDisplayWidth(node.rect);
-                image.style.maxWidth = "100%";
-                image.style.height = "auto";
-                image.style.margin = "0 auto";
-                figure.appendChild(image);
+            if (captioned) {
+                let caption = document.createElement("figcaption");
+                caption.innerHTML = linkedNodeHTML(node, linkContext);
+                caption.style.textAlign = "left";
+                rememberPDFSource(caption, node, pageProxies);
+                attachPDFSourceToggle(caption);
+                translationElements.set(index, caption);
+                figure.appendChild(caption);
             }
-            else {
+            else if (!node.imageSrc) {
                 figure.textContent = node.str;
             }
             main.appendChild(figure);
@@ -1435,12 +1344,7 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
     let pageProxies: any[] = [];
     for (let pageNumber = 1; pageNumber < pdf.numPages + 1; pageNumber++) {
         let page = await pdf.getPage(pageNumber);
-        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>, (width, height) => {
-            let canvas = document.createElement("canvas");
-            canvas.width = width;
-            canvas.height = height;
-            return canvas;
-        }));
+        pages.push(await extractPageInputFromPDFPage(page, pageNumber, pdfjsLib.OPS as unknown as Record<string, number>, createCanvas));
         pageProxies.push(page);
         if (progress) {
             progress.value = pageNumber;
@@ -1449,7 +1353,7 @@ export async function loadPDF(source: string, sourceName = source, options: PDFL
     let nodes = extractNodesFromPages(pages);
     let title = nodes.find((node) => node.type == PDF_NodeType.TITLE)?.str.trim();
     document.title = title?.replace(/\s+/g, " ") || documentBaseName(sourceName);
-    await attachNodeImages(nodes, pageProxies);
+    await attachNodeImages(nodes, pageProxies, createCanvas);
     show(nodes, pageProxies);
     if (progress) {
         progress.hidden = true;

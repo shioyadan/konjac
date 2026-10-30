@@ -14,6 +14,7 @@ PDF.js で PDF の text content と描画オブジェクトを取り出し、タ
 
 - `src/core/extractor.ts`: PDF の構造抽出の中心。本文行、見出し、図表、キャプション、リンク、HTML 生成の多くがここにある。
 - `src/core/viewer.ts`: 拡張版とWeb版で共有する viewer。PDF を読み込み、抽出結果を DOM と図表画像へ変換する。
+- `src/core/render.ts`: CLI と viewer で共有するページ描画・図表画像の切り出し。Canvas の生成は呼び出し側が担当する。
 - `src/extension/`: Chrome 拡張の service worker、viewer entry、manifest、HTML。
 - `src/cli/`: Chrome を使わず、同じ抽出エンジンで HTML/JSON/debug 出力を作る CLI。
 - `src/web/`: ローカルPDFを表示し、WorkerとCMapを単一HTMLへ埋め込むWeb版。

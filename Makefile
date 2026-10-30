@@ -72,6 +72,7 @@ distclean: clean
 # PDF なしで座標・境界・数式の回帰を確認する。
 test:
 	node tests/extractor.test.cjs
+	node tests/render.test.cjs
 
 # 手元の work/*.pdf を一括変換し、目視で指定した内容範囲と除外点を確認する。
 regression: cli-build test

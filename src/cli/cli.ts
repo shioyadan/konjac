@@ -3,14 +3,12 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
     PDF_DebugMaskDump,
-    PDF_Node,
-    PDF_NodeType,
     PDF_PageInput,
-    PDF_Rect,
     extractNodesFromPages,
     extractPageInputFromPDFPage,
     nodesToHTML
 } from "../core/extractor";
+import {attachNodeImages, PDF_CanvasFactory} from "../core/render";
 import {
     createTranslationDocument,
     matchTranslationDocument,
@@ -30,27 +28,14 @@ declare const process: {
 
 type OutputMode = "html" | "json" | "translation-json" | "translated-html";
 
-interface NodeCanvasLike {
-    width: number;
-    height: number;
-    getContext(contextId: "2d"): CanvasRenderingContext2D;
-    toDataURL(type?: string): string;
-}
-
-interface RenderedPageCanvas {
-    canvas: NodeCanvasLike;
-    pageHeight: number;
-}
-
 const {createCanvas} = require("canvas") as {
-    createCanvas: (width: number, height: number) => NodeCanvasLike;
+    createCanvas: PDF_CanvasFactory;
 };
 const fs = require("fs") as {
     mkdirSync: (path: string, options?: {recursive?: boolean}) => void;
     readFileSync: (path: string, encoding: "utf8") => string;
     writeFileSync: (path: string, data: string) => void;
 };
-const FIGURE_RENDER_SCALE = 4.0;
 
 function usage() {
     console.error("usage: node dist/cli/cli.cjs [--html|--json|--translation-json|--import-translation <json-file>] [--password <password>] [--debug-mask <dir>] [--debug-scan <caption-text>] <pdf-file>");
@@ -150,70 +135,6 @@ function parseArgs(args: string[]) {
     return {mode, fileName, translationFileName, debugMaskDir, debugScanCaption, password};
 }
 
-async function renderPageCanvas(page: any) {
-    let viewport = page.getViewport({scale: FIGURE_RENDER_SCALE});
-    let canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-    let context = canvas.getContext("2d");
-
-    context.fillStyle = "white";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({canvasContext: context, viewport}).promise;
-
-    return {
-        canvas,
-        pageHeight: page.getViewport({scale: 1}).height
-    };
-}
-
-function cropRectFromPage(renderedPage: RenderedPageCanvas, rect: PDF_Rect) {
-    let scale = FIGURE_RENDER_SCALE;
-    let sourceX = Math.max(0, Math.floor(rect.x * scale));
-    let sourceY = Math.max(0, Math.floor((renderedPage.pageHeight - rect.y - rect.height) * scale));
-    let sourceWidth = Math.min(renderedPage.canvas.width - sourceX, Math.ceil(rect.width * scale));
-    let sourceHeight = Math.min(renderedPage.canvas.height - sourceY, Math.ceil(rect.height * scale));
-
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
-        return "";
-    }
-
-    let crop = createCanvas(sourceWidth, sourceHeight);
-    let cropContext = crop.getContext("2d");
-    cropContext.fillStyle = "white";
-    cropContext.fillRect(0, 0, sourceWidth, sourceHeight);
-    (cropContext as any).drawImage(
-        renderedPage.canvas,
-        sourceX,
-        sourceY,
-        sourceWidth,
-        sourceHeight,
-        0,
-        0,
-        sourceWidth,
-        sourceHeight
-    );
-    return crop.toDataURL("image/png");
-}
-
-// 図表と数式の bbox を同じページ描画から切り出し、HTML 用 PNG を付与する。
-async function attachNodeImages(nodes: PDF_Node[], pageProxies: any[]) {
-    let pageCanvasPromises = new Map<number, Promise<RenderedPageCanvas>>();
-
-    for (let node of nodes) {
-        let images = [...(node.rect ? [node] : []),
-            ...(node.inlineImages ?? [])];
-        for (let image of images) {
-            let rect = image.rect!;
-            if (!pageCanvasPromises.has(rect.page)) {
-                let page = pageProxies[rect.page - 1];
-                if (!page) continue;
-                pageCanvasPromises.set(rect.page, renderPageCanvas(page));
-            }
-            let renderedPage = await pageCanvasPromises.get(rect.page);
-            if (renderedPage) image.imageSrc = cropRectFromPage(renderedPage, rect);
-        }
-    }
-}
-
 function writeDebugMaskDump(dir: string, dump: PDF_DebugMaskDump) {
     let base = dir.replace(/[\/\\]+$/, "");
     fs.mkdirSync(base, {recursive: true});
@@ -252,7 +173,7 @@ async function extractPDFFile(
     };
     let nodes = extractNodesFromPages(pages, debugMaskDir || debugScanCaption ? extractOptions : undefined);
     if (renderImages) {
-        await attachNodeImages(nodes, pageProxies);
+        await attachNodeImages(nodes, pageProxies, createCanvas);
     }
     let fingerprint = Array.isArray(pdf.fingerprints) && typeof pdf.fingerprints[0] == "string"
         ? pdf.fingerprints[0]
@@ -289,7 +210,7 @@ async function main() {
         }
         let {entries, warnings} = matchTranslationDocument(translationDocument, fingerprint, nodes);
         warnings.forEach((warning) => console.warn(`Warning: ${warning}`));
-        await attachNodeImages(nodes, pageProxies);
+        await attachNodeImages(nodes, pageProxies, createCanvas);
         console.log(nodesToHTML(translatedNodesFromEntries(entries, nodes), nodes));
     }
     else {

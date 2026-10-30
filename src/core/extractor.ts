@@ -1215,8 +1215,8 @@ function authorTextFromLines(lines: TextLine[]) {
         .join(", ");
 }
 
-// 所属・所在地・連絡先は著者の直後に一つのメタデータ段落としてまとめる。
-function affiliationTextFromLines(lines: TextLine[]) {
+// タイトル・所属・キャプションの折り返しを、本文と同じ連結規則で復元する。
+function textFromLines(lines: TextLine[]) {
     return lines.reduce((text, line) => appendLineText(text, line.text), "");
 }
 
@@ -1228,12 +1228,10 @@ function isReferencesHeading(text: string) {
     return /^(?:REFERENCES|References):?$/.test(text);
 }
 
-function isAcknowledgementsHeading(text: string) {
-    return /^(?:ACKNOWLEDGEMENTS?|Acknowledgements?|ACKNOWLEDGMENTS?|Acknowledgments?):?$/.test(text);
-}
-
-function isAppendixHeading(text: string) {
-    return /^(?:[A-Z]+ )*APPENDIX(?: [A-Z0-9])?$|^Appendix(?: [A-Z0-9])?$/.test(text);
+function isUnnumberedHeading(text: string) {
+    return isAbstractHeading(text) || isReferencesHeading(text) ||
+        /^(?:ACKNOWLEDGEMENTS?|Acknowledgements?|ACKNOWLEDGMENTS?|Acknowledgments?):?$/.test(text) ||
+        /^(?:[A-Z]+ )*APPENDIX(?: [A-Z0-9])?$|^Appendix(?: [A-Z0-9])?$/.test(text);
 }
 
 function arabicSectionNumbers(text: string) {
@@ -1273,13 +1271,7 @@ function isNumberedSectionHeading(text: string) {
 }
 
 function isHeadingText(text: string) {
-    return (
-        isAbstractHeading(text) ||
-        isReferencesHeading(text) ||
-        isAcknowledgementsHeading(text) ||
-        isAppendixHeading(text) ||
-        isNumberedSectionHeading(text)
-    );
+    return isUnnumberedHeading(text) || isNumberedSectionHeading(text);
 }
 
 // フォントサイズと文字列パターンから見出し行を判定する。
@@ -1288,7 +1280,7 @@ function isHeadingLine(line: TextLine, bodyFontSize: number, relaxed = false) {
         return false;
     }
 
-    if (isAbstractHeading(line.text) || isReferencesHeading(line.text) || isAcknowledgementsHeading(line.text) || isAppendixHeading(line.text)) {
+    if (isUnnumberedHeading(line.text)) {
         return true;
     }
 
@@ -1361,7 +1353,7 @@ function isWrappedHeadingContinuation(line: TextLine, next: TextLine, bodyFontSi
         line.y - next.y < line.fontSize * 1.6 && Math.abs(line.fontSize - next.fontSize) < 0.5 &&
         (Math.abs(line.x - next.x) < 2 || Math.abs(line.x + line.width / 2 - next.x - next.width / 2) < bodyFontSize) &&
         next.parts.every((part) => line.parts.some((first) => first.fontName == part.fontName)) &&
-        !isNumberedSectionHeading(next.text) && !isHeadingText(next.text) &&
+        !isHeadingText(next.text) &&
         (line.fontSize >= bodyFontSize + 1.5 ? /^[A-Z][A-Za-z0-9 &()/\-]+$/ : /^[A-Z][A-Z0-9 &()/\-]+$/).test(next.text);
 }
 
@@ -3117,19 +3109,20 @@ function restoreInlineContent(
     lines: TextLine[], reserved: Set<TextLine>, bodyFontSize: number, columnWidth: number,
     layout: BodyLayoutModel, metrics: Map<number, PageMetrics>, excluded: PDF_Rect[], nextMarker: (page: number) => string
 ) {
-    let available = lines.filter((line) => !reserved.has(line) && !excluded.some((rect) => lineCenterInsideRect(line, rect)));
-    let sourceLines = new Map(available.flatMap((line) => line.parts.map((part) => [part, line] as const)));
-    let parts = available.flatMap((line) => line.parts);
+    let available = new Set(lines.filter((line) => !reserved.has(line) && !excluded.some((rect) => lineCenterInsideRect(line, rect))));
+    let sourceLines = new Map([...available].flatMap((line) => line.parts.map((part) => [part, line] as const)));
+    let parts = [...available].flatMap((line) => line.parts);
     let columns = distinctBodyColumns(layout, columnWidth);
     let columnFor = (part: {page: number; x: number; width: number}) => columns.filter((column) => column.page == part.page &&
         part.x >= column.x - bodyFontSize * 2 && part.x + part.width <= column.x + columnWidth + bodyFontSize)
         .sort((a, b) => a.x - b.x)[0];
     let rows: {page: number; x: number; y: number; fontSize: number; parts: TextPart[]; words: Set<TextPart>}[] = [];
     // アクセントや、1字分の幅に長い綴りが割り当てられた拡張字形を本文の baseline にしない。
-    let accent = (part: TextPart) => /^[˜~^¯ˉˆˇ˘˙¨]+$/.test(part.text);
-    let denseGlyph = (part: TextPart) => part.text.replace(/\s/g, "").length >= 4 &&
-        part.width < part.fontSize * part.text.replace(/\s/g, "").length * 0.15;
-    let mathGlyph = (part: TextPart) => accent(part) || denseGlyph(part);
+    let denseGlyph = (part: TextPart) => {
+        let length = part.text.replace(/\s/g, "").length;
+        return length >= 4 && part.width < part.fontSize * length * 0.15;
+    };
+    let mathGlyph = (part: TextPart) => /^[˜~^¯ˉˆˇ˘˙¨]+$/.test(part.text) || denseGlyph(part);
     for (let part of parts) {
         let source = sourceLines.get(part)!;
         let smallProse = part.fontSize < bodyFontSize * 0.85 && (source.text.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 2;
@@ -3147,8 +3140,7 @@ function restoreInlineContent(
     for (let part of parts) {
         let source = sourceLines.get(part)!;
         // 拡張フォントの大きな括弧や積分記号は、上端を baseline として持つことがある。
-        let topAligned = part.fontAscent === 0 && /^[()[\]{}∫∑∏√⌊⌋⌈⌉]+$/.test(part.text) &&
-            source.parts.every((other) => other.fontAscent === 0 && /^[()[\]{}∫∑∏√⌊⌋⌈⌉]+$/.test(other.text));
+        let topAligned = source.parts.every((other) => other.fontAscent === 0 && /^[()[\]{}∫∑∏√⌊⌋⌈⌉]+$/.test(other.text));
         let extension = topAligned || source.parts.some(denseGlyph) && source.parts.every((other) => other.unmapped || denseGlyph(other));
         let distance = (row: typeof rows[number]) => Math.abs(row.y - (part.inkRect
             ? part.inkRect.y + part.inkRect.height / 2 - row.fontSize * 0.3 : part.y - (topAligned ? row.fontSize * 0.8 : 0)));
@@ -3254,13 +3246,13 @@ function restoreInlineContent(
     }
     let emitted = new Set<typeof rows[number]>();
     return lines.flatMap((line) => {
+        if (!available.has(line)) return [line];
         // 数式だけの短い項目など、本文行の復元対象に入らない箇条書きにも字下げを付ける。
-        if (available.includes(line) && BULLET_ITEM_PATTERN.test(line.text) &&
+        if (BULLET_ITEM_PATTERN.test(line.text) &&
             Math.abs(lineDominantFontSize(line) - bodyFontSize) < bodyFontSize * 0.15) {
             let column = columnFor(line);
             line.listIndent = column ? (line.x - column.x) / bodyFontSize : 0;
         }
-        if (!available.includes(line)) return [line];
         if (!line.parts.some((part) => part.unmapped || replacements.has(owners.get(part)!))) return [line];
         let result: TextLine[] = [], remaining: TextPart[] = [];
         for (let part of line.parts) {
@@ -3361,38 +3353,19 @@ export function extractNodesFromPages(pages: Array<unknown[] | PDF_PageInput>, o
             pageMetrics, figureRects, nextMathMarker);
         let images = captionLines.flatMap((line) => line.parts.flatMap((part) => part.inlineImage ? [part.inlineImage] : []));
         if (images.length) {
-            figure.node.str = captionLines.reduce((text, line) => appendLineText(text, line.text), "");
+            figure.node.str = textFromLines(captionLines);
             figure.node.inlineImages = images;
         }
     }
 
     let nodes: PDF_Node[] = [];
-    if (metadata.titleLines.length > 0) {
-        let metadataTitle = metadata.titleLines.reduce((text, line) => appendLineText(text, line.text), "");
-        nodes.push(new PDF_Node(
-            metadataTitle,
-            PDF_NodeType.TITLE,
-            undefined,
-            sourceRectFromLines(metadata.titleLines)
-        ));
-    }
-    let metadataAuthors = authorTextFromLines(metadata.authorLines);
-    if (metadataAuthors != "") {
-        nodes.push(new PDF_Node(
-            metadataAuthors,
-            PDF_NodeType.AUTHOR,
-            undefined,
-            sourceRectFromLines(metadata.authorLines)
-        ));
-    }
-    let metadataAffiliations = affiliationTextFromLines(metadata.affiliationLines);
-    if (metadataAffiliations != "") {
-        nodes.push(new PDF_Node(
-            metadataAffiliations,
-            PDF_NodeType.AFFILIATION,
-            undefined,
-            sourceRectFromLines(metadata.affiliationLines)
-        ));
+    for (let [type, lines] of [
+        [PDF_NodeType.TITLE, metadata.titleLines],
+        [PDF_NodeType.AUTHOR, metadata.authorLines],
+        [PDF_NodeType.AFFILIATION, metadata.affiliationLines]
+    ] as const) {
+        let text = type == PDF_NodeType.AUTHOR ? authorTextFromLines(lines) : textFromLines(lines);
+        if (text) nodes.push(new PDF_Node(text, type, undefined, sourceRectFromLines(lines)));
     }
     let title = "";
     let titleLines: TextLine[] = [];
@@ -3802,22 +3775,16 @@ export function nodesToHTML(nodes: PDF_Node[], structureNodes: PDF_Node[] = node
             node.type == PDF_NodeType.AUTHOR ? ` class="authors"` :
             node.type == PDF_NodeType.AFFILIATION ? ` class="affiliations"` :
             "";
-        if (node.type == PDF_NodeType.FIGURE) {
+        if (node.type == PDF_NodeType.FIGURE || node.type == PDF_NodeType.EQUATION || node.type == PDF_NodeType.BLOCK_IMAGE) {
+            let captioned = node.type == PDF_NodeType.FIGURE;
             let imageWidth = figureImageDisplayWidth(node.rect);
             let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
             let image = node.imageSrc
                 ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
                 : "";
-            body.push(`<figure${idAttr}>${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption></figure>`);
-            continue;
-        }
-        if (node.type == PDF_NodeType.EQUATION || node.type == PDF_NodeType.BLOCK_IMAGE) {
-            let imageWidth = figureImageDisplayWidth(node.rect);
-            let imageStyle = imageWidth ? ` style="width: ${imageWidth};"` : "";
-            let image = node.imageSrc
-                ? `<img src="${escapeHTML(node.imageSrc)}" alt="${escapeHTML(node.str)}"${imageStyle}>`
-                : escapeHTML(node.str);
-            body.push(`<figure class="${node.type == PDF_NodeType.EQUATION ? "equation" : "block-image"}"${idAttr}>${image}</figure>`);
+            let figureClass = captioned ? "" : ` class="${node.type == PDF_NodeType.EQUATION ? "equation" : "block-image"}"`;
+            let content = captioned ? `${image}<figcaption>${linkedNodeHTML(node, linkContext)}</figcaption>` : image || escapeHTML(node.str);
+            body.push(`<figure${figureClass}${idAttr}>${content}</figure>`);
             continue;
         }
 
