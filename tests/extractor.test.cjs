@@ -1081,3 +1081,107 @@ test('an isolated bullet in a larger publication footer does not create a list',
     assert.match(html, /<li>A standalone item within the body text\.<\/li>/);
     assert.ok(!html.includes('<li>Annual International Conference'));
 });
+
+test('wrapped URLs preserve hyphens and small-font path lines in the same paragraph', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('The source is at https://example.org/project-', 40, 650, 240),
+        text('name/release_2026 and https://archive.org/', 40, 638, 240, 8.5),
+        text('records/12345). The experiments are available.', 40, 626, 240)]);
+    assert.ok(nodes.some((n) => n.type === 1 && n.str.includes(
+        'https://example.org/project-name/release_2026 and https://archive.org/records/12345)')));
+});
+
+test('drawn underscores restore identifiers without turning longer rules into characters', () => {
+    const nodes = extract([...paragraph(40, 750),
+        text('The variable', 40, 650, 55), text('ROOT PATH', 100, 650, 45), text('selects the folder.', 155, 650, 125),
+        text('Follow https://example.org/release', 40, 620, 200),
+        text('2026 for the experiment files.', 40, 608, 240),
+        text('A normal sentence with spaces.', 40, 575, 240)],
+        [shape(120, 649, 5, .5), shape(240, 619, 5, .5), shape(40, 574, 240, .5)]);
+    assert.ok(nodes.some((n) => n.str.includes('ROOT_PATH selects the folder.')));
+    assert.ok(nodes.some((n) => n.str.includes('https://example.org/release_2026')));
+    assert.ok(nodes.some((n) => n.str === 'A normal sentence with spaces.'));
+});
+
+test('appendix headings survive uppercase filtering without claiming short math variables', () => {
+    const nodes = extract([...paragraph(40, 750), text('APPENDIX', 40, 650, 60),
+        text('A ADDITIONAL RESULTS', 40, 630, 150), ...paragraph(40, 610),
+        text('M LP', 100, 540, 30), text('= x / y', 135, 540, 45), text('(1)', 265, 540, 15)]);
+    assert.deepEqual(nodes.filter((n) => n.type === 3).map((n) => n.str), ['APPENDIX', 'A ADDITIONAL RESULTS']);
+    assert.ok(equations(nodes).some((n) => n.str.includes('M LP')));
+});
+
+test('proportional code with inline comments stays outside body boundaries', () => {
+    const body = (item) => ({...item, fontName: 'serif'});
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 550),
+        text('The update uses the following algorithm:', 40, 700, 240),
+        text('if (ready) { // the input is ready', 80, 680, 180),
+        text('if (x < limit) x++;', 90, 666, 140),
+        text('} else { // the input is not ready', 80, 652, 180),
+        text('if (x > 0) x--;', 90, 638, 140), text('}', 80, 624, 6)].map(body));
+    const blocks = nodes.filter((n) => n.type === 9);
+    assert.equal(blocks.length, 1);
+    assert.ok(encloses(blocks[0].rect, {x: 80, y: 624, width: 180, height: 66}));
+    assert.ok(nodes.filter((n) => n.type === 1).every((n) => !n.str.includes('//')));
+});
+
+test('centered title-case table descriptions join their label and stay outside the image', () => {
+    const table = shape(50, 560, 220, 100);
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 500),
+        text('TABLE 1', 140, 700, 40, 9), text('Summary of Experimental Parameters', 60, 689, 200, 9),
+        text('for Different Configurations', 80, 678, 160, 9)], [table]);
+    const [figure] = figures(nodes);
+    assert.equal(figure.str, 'TABLE 1 Summary of Experimental Parameters for Different Configurations');
+    assert.ok(encloses(figure.rect, table) && top(figure.rect) < 678);
+});
+
+test('top-aligned math delimiters attach below the preceding prose and keep both parentheses', () => {
+    const glyph = (str, x, y, width) => ({...text(str, x, y, width), fontAscent: 0});
+    const nodes = extract([...paragraph(40, 750), ...paragraph(40, 540),
+        text('Ordinary prose immediately precedes the formula.', 40, 666, 240),
+        text('The bound is', 40, 650, 60), text('O', 105, 650, 8),
+        glyph('(', 115, 661, 6), text('1', 123, 654, 4, 7), text('k', 123, 646, 4, 7), glyph(')', 130, 661, 6),
+        text('; therefore the method converges.', 135.99, 650, 144),
+        text('The integral', 40, 620, 60), glyph('∫', 110, 629, 5), text('x', 120, 620, 6),
+        text('describes the result.', 140, 620, 140)]);
+    const bound = nodes.find((n) => n.str.includes('The bound is'));
+    const image = bound.inlineImages.find((i) => i.baseline === 650);
+    assert.ok(encloses(image.rect, {x: 115, y: 646, width: 21, height: 15}));
+    assert.ok(nodes.some((n) => n.str.includes('The integral') && n.inlineImages?.some((i) => i.baseline === 620)));
+    assert.ok(nodes.filter((n) => n.type === 1).every((n) => !/[()∫]/.test(n.str)));
+});
+
+test('centers and divisions below authors remain affiliations', () => {
+    for (const affiliation of ['Computer Science Division', 'Regional Supercomputing Center']) {
+        const nodes = extractNodesFromPages([{width: 600, height: 800, items: [
+            text('A Novel Processor Architecture', 40, 740, 400, 18),
+            text('Alice Smith, Bob Jones', 40, 700, 220, 12), text(affiliation, 40, 680, 220),
+            text('Abstract', 40, 640, 50), ...paragraph(40, 620)]}]);
+        assert.deepEqual(nodes.filter((n) => n.type === 7).map((n) => n.str), ['Alice Smith, Bob Jones']);
+        assert.deepEqual(nodes.filter((n) => n.type === 8).map((n) => n.str), [affiliation]);
+    }
+});
+
+test('paragraphs beginning with citations link to the bibliography instead of claiming its anchors', () => {
+    const {PDF_Node, buildHTMLLinkContext, linkedNodeHTML} = engine.exports;
+    const prose = new PDF_Node('[1] is the first approach, compared with [2].', 1);
+    const refs = [new PDF_Node('[1] A. Smith. First study.', 1), new PDF_Node('[2] B. Jones. Second study.', 1)];
+    for (const heading of [[], [new PDF_Node('References', 3)]]) {
+        const context = buildHTMLLinkContext([prose, ...heading, ...refs]);
+        assert.equal(context.ids.has(prose), false);
+        for (const key of ['1', '2']) assert.ok(linkedNodeHTML(prose, context).includes(`href="#${context.references.get(key)}"`));
+        assert.ok(!linkedNodeHTML(refs[0], context).includes('<a'));
+    }
+});
+
+test('narrow repeated gutters survive centered cover text and retain each column in order', () => {
+    const left = ['This archive preserves', 'the original scientific research', 'from public institutions', 'and private laboratories.'];
+    const rightText = ['A separate description explains', 'the terms of access to articles', 'from collaborating institutions', 'and research organizations.'];
+    const nodes = extract([
+        text('A wide citation before the two columns covers the full page.', 56, 730, 504),
+        text('Centered document identifier', 220, 650, 175),
+        ...left.map((str, i) => text(str, 56, 550 - i * 14, 236)),
+        ...rightText.map((str, i) => text(str, 302, 550 - i * 14, 236))]);
+    assert.ok(nodes.some((n) => n.str === left.join(' ')));
+    assert.ok(nodes.some((n) => n.str === rightText.join(' ')));
+});

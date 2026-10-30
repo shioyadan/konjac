@@ -3,11 +3,15 @@
     "figures": 22, "equations": 0,
     "lists": [{"page": 2, "items": ["We proposed", "We identified", "We presented", "We implemented a cycle-accurate",
       {"text": "We evaluated", "includes": "comparable to RISC. This energy reduction"}, "We implemented soft processors"]}],
-    "prose": ["out-of-order window size (e.g., 256) [3, 4, 5, 6]."],
+    "prose": ["out-of-order window size (e.g., 256) [3, 4, 5, 6].", "relay instructions are needed, and the frequency at which they occur is"],
+    "absentParagraphs": [")"],
     "paragraphStarts": ["Register renaming is necessary", "The register renaming is generally implemented", "These mechanisms rapidly increase"],
     "regions": [
       {"caption": "Figure 1:", "page": 1, "content": [335, 445, 205, 225], "exclude": [[200, 600]]},
       {"caption": "Figure 5:", "page": 4, "content": [342, 121, 205, 59], "exclude": [[450, 195]]},
+      {"inline": true, "page": 4, "content": [138, 102, 28, 16], "exclude": [[150, 124], [175, 110]]},
+      {"inline": true, "page": 4, "content": [235, 102, 29, 16], "exclude": [[250, 124]]},
+      {"inline": true, "page": 4, "content": [91, 89, 10, 10], "exclude": [[105, 94]]},
       {"caption": "Table 1:", "page": 7, "content": [328, 406, 214, 49], "exclude": [[440, 470]]},
       {"caption": "Algorithm 1", "page": 8, "content": [328, 534, 226, 84], "exclude": [[450, 626], [400, 515], [400, 494]]},
       {"caption": "Table 2:", "page": 9, "content": [57, 90, 235, 217], "exclude": [[330, 200]]},
@@ -17,7 +21,7 @@
   "test3": {
     "figures": 10, "equations": 0, "blocks": 5,
     "paragraphStarts": ["Normal runs at 2.0 GHz without eco mode.", "Normal eco runs at 2.0 GHz with eco mode.", "Boost runs at 2.2 GHz without eco mode.", "Boost eco runs at 2.2 GHz with eco mode.", "We can utilize this eco mode", "However, while the boost mode", "It is not possible to directly specify", "Fugaku can use this Power API"],
-    "prose": ["First, the environment variable of XOS MMM L ARENA LOCK TYPE was not set.",
+    "prose": ["First, the environment variable of XOS_MMM_L_ARENA_LOCK_TYPE was not set.",
       "Normal runs at 2.0 GHz without eco mode.", "Boost runs at 2.2 GHz without eco mode."],
     "regions": [
       {"caption": "Figure 1.", "page": 1, "content": [319, 470, 233, 116], "exclude": [[440, 640]]},
@@ -53,6 +57,8 @@
   },
   "test5": {
     "figures": 21, "equations": 0,
+    "headings": ["APPENDIX", "ARTIFACT APPENDIX"],
+    "prose": ["GitHub repository (https://github.com/scale-snu/AE_DRAMScope_ISCA2024) and Zenodo (https://zenodo.org/records/11044630)", "following repository: https://github.com/scale-snu/AE_DRAMScope_ISCA2024"],
     "lists": [{"page": 13, "items": ["A host x86", "An FPGA board with DIMM", "An FPGA board with HBM2", "A rubber heater", "A temperature controller"]}],
     "paragraphStarts": ["We conducted experiments using Intel Core i5-7500"],
     "regions": [
@@ -137,6 +143,7 @@
     ]
   },
   "test10": {
+    "author": "Christos Kozyrakis, David Patterson",
     "figures": 9, "equations": 0,
     "paragraphStarts": ["For a fair comparison between the CLVRF"],
     "regions": [
@@ -152,7 +159,9 @@
     ]
   },
   "test11": {
+    "author": "Timothy Hayes Oscar Palomar Osman Unsal Adrian Cristal Mateo Valero",
     "referenceCount": 43,
+    "linkedProse": ["[26] is", "[42] is", "[16] is", "[15] is"],
     "figures": 16, "equations": 0,
     "prose": ["For vector memory fences it is necessary to mark the reorder buffer", "Vector memory requests had to be handled differently", "load/store queue (LSQ) must be used."],
     "regions": [
@@ -193,8 +202,9 @@
     ]
   },
   "test13": {
-    "headings": ["6.3 CAT on TAGE?"],
-    "figures": 16, "equations": 10, "blocks": 3, "readableMath": true,
+    "headings": ["6.3 CAT on TAGE?", "APPENDIX", "A LEGEND FOR FIGURE 1"],
+    "absentParagraphs": ["∫", "}"],
+    "figures": 16, "equations": 10, "blocks": 4, "readableMath": true,
     "lists": [{"page": 6, "items": ["TAGE considers", "A tiny meta-predictor", "Each tagged entry", "The pred entry", "The u counters", "TAGE allocates"]}],
     "regions": [
       {"caption": "Fig. 1.", "page": 3, "content": [94, 98, 292, 538], "exclude": [[100, 660], [200, 83]]},
@@ -215,6 +225,7 @@
       {"equationIndex": 3, "page": 10, "content": [147, 147, 191, 23], "exclude": [[240, 178], [240, 135]]},
       {"equationIndex": 4, "page": 10, "content": [195, 114, 96, 11], "exclude": [[240, 135], [240, 97]]},
       {"caption": "Table 2.", "page": 11, "content": [140, 574, 206, 36], "exclude": [[200, 554]]},
+      {"blockIndex": 1, "page": 11, "content": [130, 289, 132, 81], "exclude": [[200, 382], [200, 273]]},
       {"caption": "Fig. 5.", "page": 12, "content": [124, 512, 236, 124], "exclude": [[200, 493]]},
       {"blockIndex": 1, "page": 12, "content": [166, 338, 153, 44], "exclude": [[200, 398], [200, 316]]},
       {"blockIndex": 2, "page": 12, "content": [102, 248, 148, 54], "exclude": [[130, 317], [180, 225], [200, 339]]},
@@ -315,7 +326,16 @@
       ]}
     ],
     "headingOrder": ["3 MINIMAX QUADRATIC INTERPOLATOR", "3.1 Range Reduction and Notation", "3.2 Overview of the Method"],
-    "prose": ["Let us illustrate this with an example: Consider the computation", ", is equivalent to performing an order-1 approximation to", "addressed by Muller [25] by showing that the degree-1", "computer 3D graphics, animation, digital signal processing (DSP), computer-assisted design (CAD)", "higherprecision computations have become mandatory.", "For instance, it will be shown in Section 3.4", "producing the exactly rounded result.", "try different degrees.", "If two multiplications and two additions were performed, several sequential assimilations would be necessary, slowing down the polynomial computation significantly.", "Table 1. It happens that", "Table 7. To allow for a fair comparison", "Such acceleration can be achieved [29], [31], [36] by combining the use of redundant arithmetic, a specialized squaring unit, and the accumulation of all partial products in a multioperand adder."],
+    "captions": [
+      "TABLE 1 Implicit Bits in the Polynomial Coefficients for Some Functions (1 ulp)",
+      "TABLE 2 Summary of Design Parameters for Some Functions (1 ulp)",
+      "TABLE 3 Size of the Tables to Be Employed for Target Accuracies of 2 ulps and 4 ulps",
+      "TABLE 4 Use of Redundant Arithmetic in the Generation of the Partial Products",
+      "TABLE 5 Area and Delay Estimates of Logic Blocks Used in the Compared Interpolators",
+      "TABLE 6 Architecture Comparison (Reciprocal Computation, 1 ulp Accuracy)",
+      "TABLE 7 Architecture Comparison (Computation of Four Operations, 1 ulp Accuracy)"
+    ],
+    "prose": ["HAL is a multi-disciplinary open access archive for the deposit and dissemination of scientific research documents, whether they are published or not.", "L’archive ouverte pluridisciplinaire HAL, est destinée au dépôt et à la diffusion de documents scientifiques de niveau recherche, publiés ou non, émanant des établissements d’enseignement et de recherche français ou étrangers, des laboratoires publics ou privés.", "Let us illustrate this with an example: Consider the computation", ", is equivalent to performing an order-1 approximation to", "addressed by Muller [25] by showing that the degree-1", "computer 3D graphics, animation, digital signal processing (DSP), computer-assisted design (CAD)", "higherprecision computations have become mandatory.", "For instance, it will be shown in Section 3.4", "producing the exactly rounded result.", "try different degrees.", "If two multiplications and two additions were performed, several sequential assimilations would be necessary, slowing down the polynomial computation significantly.", "Table 1. It happens that", "Table 7. To allow for a fair comparison", "Such acceleration can be achieved [29], [31], [36] by combining the use of redundant arithmetic, a specialized squaring unit, and the accumulation of all partial products in a multioperand adder."],
     "regions": [
       {"caption": "Fig. 1.", "page": 4, "content": [293, 464, 243, 255], "exclude": [[420, 449], [200, 600]]},
       {"caption": "Fig. 2.", "page": 5, "content": [45, 497, 214, 224], "exclude": [[150, 477]]},
@@ -324,10 +344,10 @@
       {"caption": "Fig. 5.", "page": 11, "content": [116, 534, 334, 187], "exclude": [[180, 516]]},
       {"caption": "Fig. 6.", "page": 12, "content": [113, 384, 341, 337], "exclude": [[180, 366], [450, 348]]},
       {"caption": "TABLE 1", "page": 8, "content": [141, 567, 286, 124], "exclude": [[280, 714], [160, 547]]},
-      {"caption": "TABLE 2", "page": 9, "content": [121, 593, 324, 111], "exclude": [[280, 727], [150, 577]]},
+      {"caption": "TABLE 2", "page": 9, "content": [121, 593, 324, 98], "exclude": [[280, 704], [150, 577]]},
       {"caption": "TABLE 3", "page": 9, "content": [121, 451, 324, 98], "exclude": [[280, 568], [150, 428]]},
       {"caption": "TABLE 4", "page": 10, "content": [103, 603, 360, 88], "exclude": [[280, 715], [150, 580]]},
-      {"caption": "TABLE 5", "page": 13, "content": [45, 511, 214, 196], "exclude": [[150, 730], [150, 495]]},
+      {"caption": "TABLE 5", "page": 13, "content": [45, 511, 214, 174], "exclude": [[150, 700], [150, 495]]},
       {"caption": "TABLE 6", "page": 13, "content": [113, 40, 340, 67], "exclude": [[280, 130], [440, 122]]},
       {"caption": "TABLE 7", "page": 14, "content": [113, 613, 340, 78], "exclude": [[280, 715], [150, 590]]},
       {"equation": "1", "page": 4, "content": [377, 206, 163, 12], "exclude": [[420, 233], [400, 191]]},

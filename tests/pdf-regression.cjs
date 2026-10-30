@@ -56,6 +56,20 @@ for (const name of Object.keys(specs)) {
         `${file}: paragraph merged into preceding content: ${text}`);
     for (const text of spec.absent || []) assert.ok(nodes.every((node) => !node.str.includes(text)),
         `${file}: unexpected text: ${text}`);
+    for (const text of spec.absentParagraphs || []) assert.ok(nodes.every((node) => node.type !== 1 || node.str !== text),
+        `${file}: detached fragment: ${text}`);
+    for (const caption of spec.captions || []) assert.ok(nodes.some((node) => node.type === 5 && node.str === caption),
+        `${file}: incomplete caption: ${caption}`);
+    if (spec.linkedProse) {
+        const context = engine.buildHTMLLinkContext(nodes);
+        for (const prefix of spec.linkedProse) {
+            const node = nodes.find((node) => node.type === 1 && node.str.startsWith(prefix));
+            assert.ok(node && !context.ids.has(node), `${file}: prose mistaken for a reference: ${prefix}`);
+            for (const match of node.str.matchAll(/\[(\d+)\]/g)) assert.ok(
+                engine.linkedNodeHTML(node, context).includes(`href="#${context.references.get(match[1])}"`),
+                `${file}: citation ${match[0]} not linked in ${prefix}`);
+        }
+    }
     for (const expected of spec.lists || []) {
         const startText = typeof expected.items[0] === 'string' ? expected.items[0] : expected.items[0].text;
         const start = nodes.findIndex(node => node.sourceRect?.page === expected.page &&
