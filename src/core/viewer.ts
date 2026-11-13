@@ -25,13 +25,20 @@ import {
     parseTranslationDocument
 } from "./translation";
 
+import {createWebGPUTranslator, WEBGPU_MODELS} from "./webgpu_translation";
+
+import {createWllamaTranslator} from "./wllama_translation";
+
+let translationRun: AbortController | null = null;
+const translationEngines = new WeakMap<HTMLElement, string>();
+
 console.log("initialized.");
 
 const SOURCE_PREVIEW_RENDER_SCALE = 2.0;
 
 interface ChromeTranslator {
     translate(text: string): Promise<string>;
-    destroy?(): void;
+    destroy?(): void | Promise<void>;
 }
 
 interface ChromeTranslatorFactory {
@@ -451,6 +458,7 @@ function enableTranslationJSON(sourceName: string, fingerprint: string, nodes: P
         closeDocumentMenu();
         exportTranslationJSON();
     };
+    importButton.disabled = false;
     importButton.onclick = () => {
         closeDocumentMenu();
         setTranslationFileStatus("");
@@ -1097,6 +1105,7 @@ function attachPDFSourceToggle(element: HTMLElement) {
 }
 
 function attachTranslation(element: HTMLElement, translatedText: string) {
+    translationEngines.delete(element);
     let setContent = (target: HTMLElement, source: HTMLElement) => {
         let images = new Map([...source.querySelectorAll<HTMLImageElement>("img.inline-math")].map((image) => [image.dataset.math, image]));
         target.replaceChildren(...translatedText.split(/(⟦math-\d+-\d+⟧)/g)
@@ -1157,114 +1166,158 @@ function setDocumentOriginalsVisible(visible: boolean) {
 }
 
 async function translateDocument() {
-    let factory = window.Translator;
-    let translateButton = document.getElementById("translate-document");
-    let originalsButton = document.getElementById("toggle-document-originals");
+    if (translationRun) return;
+    let startedAt = performance.now();
+    let button = document.getElementById("translate-document") as HTMLButtonElement;
+    let stop = document.getElementById("stop-translation") as HTMLButtonElement;
+    let backend = document.getElementById("translation-backend") as HTMLSelectElement;
+    let modelSelect = document.getElementById("translation-model") as HTMLSelectElement;
+    let engineKey = backend.value === "chrome" ? "chrome" : `${backend.value}:${modelSelect.value}`;
+    let originals = document.getElementById("toggle-document-originals") as HTMLButtonElement;
     let status = document.getElementById("translation-status");
     let progress = document.getElementById("progress") as HTMLProgressElement | null;
-    if (!factory || !(translateButton instanceof HTMLButtonElement) || !(originalsButton instanceof HTMLButtonElement)) {
-        return;
-    }
-
-    translateButton.disabled = true;
-    if (status) {
-        status.textContent = "Preparing translation…";
-    }
-    if (progress) {
-        progress.hidden = false;
-        progress.removeAttribute("value");
-    }
-
+    let run = new AbortController();
+    translationRun = run;
+    let context = translationContext;
+    let current = () => translationContext === context && translationRun === run;
+    let translator: ChromeTranslator | undefined;
+    let failures = 0;
+    let lastFailure = "";
+    button.disabled = true;
+    backend.disabled = true;
+    modelSelect.disabled = true;
+    stop.hidden = false;
+    stop.onclick = () => run.abort();
+    let importButton = document.getElementById("import-translation-json") as HTMLButtonElement;
+    importButton.disabled = true;
+    if (status) status.textContent = "Preparing translation…";
+    if (progress) { progress.hidden = false; progress.removeAttribute("value"); }
     try {
-        // create() は言語パックのダウンロード時にユーザー操作を要求するため、
-        // Translate ボタンの click handler から直接呼び出す。
-        let translator = await factory.create({
-            sourceLanguage: "en",
-            targetLanguage: "ja",
-            monitor(monitor) {
-                monitor.addEventListener("downloadprogress", (event) => {
-                    let loaded = (event as ProgressEvent).loaded;
-                    if (progress) {
-                        progress.max = 1;
-                        progress.value = loaded;
-                    }
-                });
-            }
-        });
-
-        let elements = translatableElements();
-        if (progress) {
-            progress.max = elements.length;
-            progress.value = 0;
-        }
+        translator = backend.value !== "chrome"
+            ? await (backend.value === "wllama" ? createWllamaTranslator : createWebGPUTranslator)(run.signal, (update) => {
+                if (!current()) return;
+                if (status) status.textContent = update.message ?? `Loading model: ${update.phase}`;
+                if (progress && update.totalBytes) {
+                    progress.max = update.totalBytes;
+                    progress.value = update.loadedBytes ?? 0;
+                }
+            }, modelSelect.value)
+            : await window.Translator!.create({
+                sourceLanguage: "en", targetLanguage: "ja",
+                monitor(monitor) {
+                    monitor.addEventListener("downloadprogress", (event) => {
+                        if (current() && progress) { progress.max = 1; progress.value = (event as ProgressEvent).loaded; }
+                    });
+                }
+            });
+        run.signal.throwIfAborted();
+        let elements = translatableElements().filter((element) => translationEngines.get(element) !== engineKey);
+        if (progress) { progress.max = elements.length; progress.value = 0; }
         for (let [index, element] of elements.entries()) {
-            let sourceText = translatableText(element);
+            run.signal.throwIfAborted();
+            if (status) status.textContent = `Translating ${index + 1}/${elements.length}`;
             try {
-                let segments = await Promise.all(sourceText.split(/(⟦math-\d+-\d+⟧)/g).map((text) =>
-                    /^⟦math-\d+-\d+⟧$/.test(text) || !text.trim() ? text : translator.translate(text)));
+                let segments: string[] = [];
+                let source = element.querySelector<HTMLElement>(":scope > .translation-original") ?? element;
+                for (let text of translatableText(source).split(/(⟦math-\d+-\d+⟧)/g)) {
+                    run.signal.throwIfAborted();
+                    segments.push(/^⟦math-\d+-\d+⟧$/.test(text) || !text.trim() ? text : await translator.translate(text));
+                }
+                run.signal.throwIfAborted();
+                if (!current()) return;
                 attachTranslation(element, segments.join(""));
+                translationEngines.set(element, engineKey);
+                originals.hidden = false;
             }
             catch (error) {
+                run.signal.throwIfAborted();
+                failures++;
+                lastFailure = error instanceof Error ? error.message : String(error);
                 console.warn("Failed to translate a block", error);
             }
-            if (progress) {
-                progress.value = index + 1;
-            }
-            if (status) {
-                status.textContent = `Translating ${index + 1}/${elements.length}`;
-            }
+            if (progress) progress.value = index + 1;
         }
-        translator.destroy?.();
-
-        translateButton.hidden = true;
-        originalsButton.hidden = false;
-        setDocumentOriginalsVisible(false);
-        if (status) {
-            status.textContent = "";
-        }
+        button.hidden = failures === 0;
+        if (status) status.textContent = failures ? `${failures} blocks failed. Translate again to retry. ${lastFailure}`
+            : `Translation complete (${((performance.now() - startedAt) / 1000).toFixed(1)} s)`;
     }
     catch (error) {
-        console.warn("Translation is unavailable", error);
-        translateButton.disabled = false;
-        if (status) {
-            status.textContent = "Translation unavailable";
-        }
+        if (current() && status) status.textContent = run.signal.aborted
+            ? "Translation stopped. Translate again to resume."
+            : `Translation unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }
     finally {
-        if (progress) {
-            progress.hidden = true;
+        try { await translator?.destroy?.(); }
+        catch (error) { console.warn("Failed to release translation engine", error); }
+        if (current()) {
+            button.disabled = false;
+            backend.disabled = false;
+            modelSelect.disabled = false;
+            importButton.disabled = false;
+            stop.hidden = true;
+            if (progress) progress.hidden = true;
+            setDocumentOriginalsVisible(false);
         }
+        if (translationRun === run) translationRun = null;
     }
 }
 
 async function enableTranslation() {
-    let factory = window.Translator;
-    let controls = document.getElementById("document-controls");
-    let translationControls = document.getElementById("translation-controls");
-    let button = document.getElementById("translate-document");
-    if (!factory || !controls || !translationControls || !(button instanceof HTMLButtonElement)) {
-        return;
-    }
-
-    try {
-        if (await factory.availability({sourceLanguage: "en", targetLanguage: "ja"}) == "unavailable") {
-            return;
+    let controls = document.getElementById("translation-controls");
+    let button = document.getElementById("translate-document") as HTMLButtonElement | null;
+    let backend = document.getElementById("translation-backend") as HTMLSelectElement | null;
+    let modelSelect = document.getElementById("translation-model") as HTMLSelectElement | null;
+    if (!controls || !button || !backend || !modelSelect) return;
+    if (!modelSelect.options.length) {
+        for (let model of WEBGPU_MODELS) {
+            modelSelect.add(new Option(`${model.label} (~${model.mib} MiB)`, model.id));
         }
-        controls.hidden = false;
-        translationControls.hidden = false;
-        if (document.querySelector("#main .translatable")) {
-            button.hidden = true;
-            return;
+    }
+    modelSelect.disabled = false;
+    let context = translationContext;
+    let nativeAvailable = false;
+    for (let option of backend.options) {
+        option.disabled = option.value === "chrome" ? !nativeAvailable : !navigator.gpu;
+    }
+    backend.value = navigator.gpu ? "webgpu" : "chrome";
+    backend.disabled = false;
+    controls.hidden = false;
+    button.hidden = false;
+    button.disabled = !navigator.gpu && !nativeAvailable;
+    button.onclick = () => void translateDocument();
+    let status = document.getElementById("translation-status");
+    let updateSelection = () => {
+        modelSelect.hidden = backend.value === "chrome";
+        let model = WEBGPU_MODELS.find((candidate) => candidate.id === modelSelect.value)!;
+        let engineKey = backend.value === "chrome" ? "chrome" : `${backend.value}:${model.id}`;
+        button.hidden = !translatableElements().some((element) => translationEngines.get(element) !== engineKey);
+        if (status) status.textContent = backend.value !== "chrome"
+            ? `${model.label} · First use downloads ~${model.mib} MiB. Text stays on this device.`
+            : "Uses the browser’s local translation model.";
+    };
+    backend.onchange = updateSelection;
+    modelSelect.onchange = updateSelection;
+    updateSelection();
+    if (button.disabled && status) status.textContent = "Translation requires WebGPU (HTTPS / localhost) or the browser Translator API.";
+    // ブラウザ内蔵翻訳の可用性確認でWebGPUの操作を待たせない。
+    void (async () => {
+        try {
+            nativeAvailable = !!window.Translator && await window.Translator.availability({sourceLanguage: "en", targetLanguage: "ja"}) !== "unavailable";
         }
-        button.hidden = false;
-        button.onclick = () => void translateDocument();
-    }
-    catch (error) {
-        console.warn("Failed to check translation availability", error);
-    }
+        catch (error) { console.warn("Failed to check translation availability", error); }
+        if (translationContext !== context || !nativeAvailable) return;
+        backend.querySelector<HTMLOptionElement>('option[value="chrome"]')!.disabled = false;
+        if (!translationRun && backend.value === "chrome") {
+            button.disabled = false;
+            updateSelection();
+        }
+    })();
 }
 
 export async function loadPDF(source: string, sourceName = source, options: PDFLoadOptions = {}) {
+    translationRun?.abort();
+    translationRun = null;
+    document.getElementById("stop-translation")?.setAttribute("hidden", "");
     document.title = documentBaseName(sourceName);
     let progress = document.getElementById("progress") as HTMLProgressElement | null;
     let main = document.getElementById("main");

@@ -17,6 +17,8 @@ module.exports = (_env, argv) => {
         target: "web",
         module: {
             rules: [
+                {test: /@wllama[\\/]wllama[\\/]esm[\\/]index\.js$/, use: require.resolve("./build/wllama-extension-loader.cjs")},
+                {test: /\.wasm$/, type: "asset/resource", generator: {filename: "wllama.wasm"}},
                 {
                     test: /\.ts$/,
                     use: "ts-loader"

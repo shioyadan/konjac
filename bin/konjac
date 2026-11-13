@@ -8,6 +8,7 @@ Usage: konjac <command> [options] <pdf-file> [output]
        konjac import [options] <pdf-file> <translation-json> [output]
 
 Commands:
+  benchmark         Benchmark local WebGPU translation (benchmark --help)
   html              Generate HTML (default: <pdf-name>.html)
   json              Generate extraction JSON (default: <pdf-name>.json)
   extract-json      Alias for json
@@ -56,6 +57,9 @@ command_name=$1
 shift
 translation_required=0
 case "$command_name" in
+    benchmark)
+        exec "${KONJAC_NODE:-node}" "$project_dir/scripts/benchmark.cjs" "$@"
+        ;;
     html)
         cli_mode=--html
         output_suffix=.html

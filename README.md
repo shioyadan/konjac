@@ -49,6 +49,47 @@ WSL上の`file://wsl.localhost/...`では、保存済みファイルハンドル
 - 翻訳後は、文書全体または段落ごとに原文の表示を切り替えられます。
 - 「Export HTML」は、その時点の翻訳、原文表示、図表を単独で開けるHTMLへ保存します。
 
+## WebGPUによるローカル翻訳
+
+Web版とChrome拡張の翻訳エンジンで「hachiue (WebGPU)」または「wllama (WebGPU)」を選び、「Translate to Japanese」を押すと英語を日本語へ翻訳します。[hachiue](https://github.com/toyoshim-i/hachiue) 0.3.1 と [wllama](https://github.com/ngxson/wllama) 3.13.0 を同梱し、PLaMo 3 Translateの重みをモデル欄から選べます。
+
+| モデル | 初回ダウンロード容量（目安） |
+| --- | --- |
+| 0.8B Q4_0（初期選択） | 522 MiB |
+| 2B Q4_0 | 1,620 MiB |
+| 2B Q4_K_M | 1,723 MiB |
+
+2Bは0.8Bより多くのGPUメモリを使います。エンジンまたはモデルを変更して再度「Translate to Japanese」を押すと、原文から再翻訳して表示中の訳文を更新します。同じモデルでの中止・再開では完了済みブロックを再利用します。比較用に残したい訳文は変更前にHTMLまたは翻訳JSONへ保存してください。
+
+初回はHugging Faceから選択したモデルを取得し、モデルごとにキャッシュします。PDF本文は外部へ送信せず、端末のGPUで推論します。モデルはブラウザのOPFSまたはIndexedDBへキャッシュされます（ブラウザのサイトデータ削除で消去できます）。モデルの利用条件は配布元（[0.8B](https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF)、[2B](https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF)）を参照してください。
+
+WebGPU対応ブラウザとGPUが必要です。wllamaはJSPI・Memory64対応の新しいChrome/Edgeを想定し、非対応時はエラーを表示します。wllamaのWorkerは拡張版のCSPに対応するためビルド時にファイルへ取り出します。約10 MiBのWASMは拡張版では別ファイル、Web版ではHTML内に同梱します。互換ランタイムをCDNから取得しません。両エンジンの重みキャッシュは別々なので、切替時には同じ重みでも再ダウンロードされる場合があります。Web版はHTTPSまたは `make web-serve` のlocalhostで開いてください。GPUメモリ不足などではエラーを表示します。「Browser translation」で従来のブラウザ内蔵翻訳も選べます。
+
+「Stop」で中止でき、再度翻訳すると完了済みのブロックを残して続行します。長い本文は分割して逐次翻訳し、数式画像は保持します。翻訳結果は原文切替、HTML保存、翻訳JSON保存に対応します。CLIはモデルを実行しません。
+
+## CLIで翻訳ベンチマーク
+
+Node.js 20以降とWebGPU対応のChromeが必要です。CLIからPlaywrightでブラウザを起動し、viewerと同じ翻訳アダプターを使います。追加依存は `npm install` で導入できます。
+
+```sh
+make benchmark-build
+# 重みをダウンロードせず、GPUとブラウザの情報だけ確認
+bin/konjac benchmark --probe
+# 同じ本文を両エンジンで比較（結果はJSON、進捗は標準エラー）
+bin/konjac benchmark --input sample.txt --model 2b-q4_k_m > benchmark.json
+# PDFから抽出した原文を使う場合
+bin/konjac translation-json work/paper.pdf /tmp/paper.translation.json
+bin/konjac benchmark --input /tmp/paper.translation.json --engine wllama > benchmark.json
+```
+
+テキストは空行で段落に分けます。翻訳JSONは `blocks[].source` を使います。`--runs 3 --warmup 1` が初期値です。各エンジンについて読み込み時間（ダウンロード・キャッシュ・GPU準備を含む）、ウォームアップ時間、各反復の翻訳時間・訳文・入力文字数/秒、翻訳時間の中央値を記録します。トークン/秒や翻訳品質スコアは計測しません。同じ入力の反復なので、エンジン内部のプロンプトキャッシュ再利用も測定に含まれます。
+
+両エンジンはhachiue→wllamaの順で逐次実行し、ページを閉じてリソースを解放します。測定は最大30分/エンジン（`--timeout`で変更可）で中断します。失敗したエンジンはJSONにエラーを残し、終了コードを非ゼロにします。
+
+キャッシュ用の専用ブラウザプロファイルは既定で `~/.cache/konjac/benchmark`、オリジンは `http://127.0.0.1:8767` です。通常のWeb版・拡張版のキャッシュとは別です。`--profile`で別のディレクトリを指定すれば初回読み込みを比較できます。ポートを変更するとオリジンも変わります。既存キャッシュの有無は自動判定せず、結果にもその旨を記録します。
+
+Chromeを自動検出できない場合は `--browser-path /path/to/chrome`、画面を表示して実行する場合は `--headed` を指定します。ソフトウェアGPUを検出すると通常は停止します。診断目的でのみ `--allow-software-gpu` を指定でき、この結果は実GPUの速度として扱わないでください。Nodeの実行ファイルは `KONJAC_NODE` で指定できます。翻訳本文は外部へ送信しませんが、初回のモデル取得にはネット接続が必要です。
+
 ## 翻訳JSON
 
 翻訳JSONを使うと、Konjacの外部で翻訳を作成し、Web版、Chrome拡張、CLIへ戻せます。

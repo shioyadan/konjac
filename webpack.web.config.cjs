@@ -34,6 +34,7 @@ module.exports = (_env, argv) => {
         },
         module: {
             rules: [
+                {test: /\.wasm$/, type: "asset/inline"},
                 {
                     test: /pdf\.worker\.mjs$/,
                     use: {
@@ -71,6 +72,8 @@ module.exports = (_env, argv) => {
                 minify: isProduction,
                 licenses: {
                     konjac: readLicense("LICENSE.md"),
+                    hachiue: readLicense("node_modules/hachiue/LICENSE"),
+                    wllama: readLicense("node_modules/@wllama/wllama/LICENCE"),
                     pdfjs: readLicense("node_modules/pdfjs-dist/LICENSE"),
                     cmaps: readLicense("node_modules/pdfjs-dist/cmaps/LICENSE")
                 }

@@ -21,8 +21,14 @@ extension-build:
 	npx webpack --config=webpack.config.cjs --mode=production
 	mkdir -p dist/extension/cmaps
 	cp -r node_modules/pdfjs-dist/cmaps/. dist/extension/cmaps
+	cp node_modules/hachiue/LICENSE dist/extension/hachiue-LICENSE
+	cp node_modules/@wllama/wllama/LICENCE dist/extension/wllama-LICENSE
 	cp src/extension/manifest.json dist/extension/manifest.json
 	cp src/extension/viewer.html dist/extension/viewer.html
+
+.PHONY: benchmark-build
+benchmark-build:
+	npx webpack --config=webpack.benchmark.config.cjs
 
 web-build:
 	npx webpack --config=webpack.web.config.cjs --mode=production
@@ -73,6 +79,9 @@ distclean: clean
 test:
 	node tests/extractor.test.cjs
 	node tests/render.test.cjs
+	node tests/webgpu_translation.test.cjs
+	node tests/wllama_translation.test.cjs
+	node tests/benchmark.test.cjs
 
 # 手元の work/*.pdf を一括変換し、目視で指定した内容範囲と除外点を確認する。
 regression: cli-build test
